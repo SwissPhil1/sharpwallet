@@ -1,0 +1,66 @@
+# SharpWallet
+
+Tracks and scores sharp wallets on Polymarket. Identifies consistently
+profitable bettors using CLV, calibration, and Bayesian win rate scoring.
+
+## Files — Upload All of These to GitHub
+
+|File                    |What it does                                                                      |
+|------------------------|----------------------------------------------------------------------------------|
+|`scheduler.py`          |**Main entry point.** Railway runs this. Triggers batch scoring weekly.           |
+|`leaderboard_scraper.py`|Pulls top 200 wallets from Polymarket leaderboard, filters noise, scores each one.|
+|`wallet_analyzer.py`    |Core scoring engine. Calculates CLV, PnL, calibration per wallet.                 |
+|`schema.sql`            |Run once in Supabase SQL Editor to create all database tables.                    |
+|`requirements.txt`      |Python dependencies. Railway installs these automatically.                        |
+|`Procfile`              |Tells Railway what command to run. Do not edit.                                   |
+|`.env.example`          |Template for your environment variables.                                          |
+
+## Setup Order
+
+1. Run `schema.sql` in Supabase SQL Editor
+1. Upload all files to GitHub repo
+1. Connect GitHub repo to Railway
+1. Add environment variables in Railway (see `.env.example`)
+1. Railway auto-deploys and starts scoring
+
+## Environment Variables (set in Railway dashboard)
+
+```
+SUPABASE_URL            Your Supabase project URL
+SUPABASE_SERVICE_KEY    Your Supabase service_role key (not anon key)
+TELEGRAM_BOT_TOKEN      Your Telegram bot token
+TELEGRAM_CHAT_ID        Your Telegram chat ID
+RESCORE_INTERVAL_HOURS  How often to re-score (default: 168 = 1 week)
+MIN_MARKETS             Minimum markets to consider a wallet (default: 30)
+MAX_WALLETS             How many leaderboard wallets to score (default: 200)
+```
+
+## What Happens When It Runs
+
+```
+Railway starts scheduler.py
+    → Fetches top 200 wallets from Polymarket leaderboard
+    → Filters out whale-gamblers (high profit, few markets)
+    → For each remaining wallet:
+        → Pulls all trades from CLOB API
+        → Calculates CLV per market
+        → Scores by category (sports, politics, crypto...)
+        → Saves results to Supabase
+    → Sleeps 7 days, then repeats
+```
+
+## Scoring Tiers
+
+|Tier             |Criteria                          |
+|-----------------|----------------------------------|
+|`tier_1_sharp`   |Score ≥ 75, 100+ markets          |
+|`tier_2_sharp`   |Score ≥ 60, 50+ markets           |
+|`tier_3_emerging`|Score ≥ 45, any sample            |
+|`watch`          |15–30 markets, not enough data yet|
+|`not_sharp`      |Below scoring thresholds          |
+
+## Coming Next (Phase 2)
+
+- Real-time WebSocket monitor for Tier 1 wallets
+- Telegram alerts when a sharp wallet places a large bet
+- Auto-copy via Polymarket trading API
