@@ -1,113 +1,154 @@
 """
 SharpWallet -- Leaderboard Scraper
-Pulls top wallets from Polymarket leaderboard, filters out noise,
-and runs the full scoring pipeline on each candidate.
+Discovers active wallets from high-volume resolved Polymarket markets,
+filters out noise, and runs the full scoring pipeline on each candidate.
+
+Strategy: Instead of relying on a leaderboard API (which is no longer public),
+we scan trades from the highest-volume resolved markets to find wallets with
+meaningful trading activity, then score them.
 """
 
 import asyncio
 import aiohttp
+import json
 import os
+from collections import defaultdict
 from datetime import datetime, timezone
 from supabase import create_client
-from wallet_analyzer import PolymarketClient, WalletScorer, WalletScore, print_report
+from wallet_analyzer import (
+    PolymarketClient, WalletScorer, WalletScore, print_report,
+    DATA_API, GAMMA_API,
+)
 
 # -- Configuration ------------------------------------------------------------
 
-LEADERBOARD_URL  = "https://data-api.polymarket.com/leaderboard"
-GAMMA_PROFILES   = "https://gamma-api.polymarket.com/profiles"
+MIN_MARKETS      = int(os.environ.get("MIN_MARKETS", "30"))
+MIN_VOLUME_USD   = float(os.environ.get("MIN_VOLUME_USD", "500"))
+MAX_WALLETS      = int(os.environ.get("MAX_WALLETS", "200"))
+MARKETS_TO_SCAN  = int(os.environ.get("MARKETS_TO_SCAN", "100"))
+RATE_LIMIT       = 0.15
 
-MIN_MARKETS      = int(os.environ.get("MIN_MARKETS", 30))
-MIN_ACCOUNT_DAYS = int(os.environ.get("MIN_ACCOUNT_DAYS", 60))
-MAX_WALLETS      = int(os.environ.get("MAX_WALLETS", 200))
+# -- Wallet Discovery ---------------------------------------------------------
 
-# -- Leaderboard Fetcher ------------------------------------------------------
-
-async def fetch_leaderboard(session: aiohttp.ClientSession) -> list[dict]:
+async def discover_wallets(session: aiohttp.ClientSession) -> list[dict]:
     """
-    Pull top wallets from Polymarket's leaderboard.
-    Returns list of {address, username, profit, volume, n_markets}
+    Discover active wallets by scanning trades from high-volume resolved markets.
+    Returns list of {address, n_trades, total_volume, markets_seen}.
     """
-    print("Fetching Polymarket leaderboard...")
-    wallets = []
+    print("Discovering wallets from high-volume resolved markets...")
 
-    # Fetch both all-time and monthly to get a broad seed list
-    for timeframe in ["all", "monthly"]:
-        try:
-            async with session.get(
-                LEADERBOARD_URL,
-                params={"limit": 100, "offset": 0, "window": timeframe}
-            ) as resp:
+    # Step 1: Get resolved markets sorted by volume
+    resolved_markets = []
+    offset = 0
+    batch = 50
+
+    while len(resolved_markets) < MARKETS_TO_SCAN:
+        async with session.get(f"{GAMMA_API}/markets", params={
+            "limit": batch,
+            "offset": offset,
+            "closed": "true",
+            "active": "false",
+            "order": "volume",
+            "ascending": "false",
+        }) as resp:
+            if resp.status != 200:
+                print(f"  Gamma API returned {resp.status}")
+                break
+            markets = await resp.json()
+
+        if not markets:
+            break
+
+        for m in markets:
+            try:
+                prices = json.loads(m.get("outcomePrices", "[]"))
+                is_resolved = any(float(p) >= 0.99 for p in prices)
+            except (json.JSONDecodeError, ValueError):
+                is_resolved = False
+
+            if is_resolved and float(m.get("volume", 0)) > 1000:
+                resolved_markets.append(m)
+
+        offset += batch
+        await asyncio.sleep(RATE_LIMIT)
+        print(f"  Scanned {offset} markets, found {len(resolved_markets)} resolved")
+
+        if len(markets) < batch:
+            break
+
+    print(f"Found {len(resolved_markets)} resolved markets with volume > $1k")
+
+    # Step 2: Scan trades from these markets to find active wallets
+    wallet_stats = defaultdict(lambda: {
+        "n_trades": 0,
+        "total_volume": 0.0,
+        "markets_seen": set(),
+    })
+
+    for i, m in enumerate(resolved_markets[:MARKETS_TO_SCAN]):
+        cid = m.get("conditionId", "")
+        if not cid:
+            continue
+
+        offset = 0
+        while True:
+            async with session.get(f"{DATA_API}/trades", params={
+                "conditionId": cid,
+                "limit": 500,
+                "offset": offset,
+            }) as resp:
                 if resp.status != 200:
-                    print(f"  Leaderboard {timeframe} returned {resp.status}")
+                    break
+                trades = await resp.json()
+
+            if not trades:
+                break
+
+            for t in trades:
+                wallet = t.get("proxyWallet", "")
+                if not wallet:
                     continue
-                data = await resp.json()
-                entries = data if isinstance(data, list) else data.get("data", [])
+                size = float(t.get("size", 0))
+                price = float(t.get("price", 0))
+                wallet_stats[wallet]["n_trades"] += 1
+                wallet_stats[wallet]["total_volume"] += size * price
+                wallet_stats[wallet]["markets_seen"].add(cid)
 
-                for entry in entries:
-                    wallets.append({
-                        "address":  entry.get("proxy_wallet_address", "").lower(),
-                        "username": entry.get("name", ""),
-                        "profit":   float(entry.get("profit", 0)),
-                        "volume":   float(entry.get("volume", 0)),
-                        "n_markets": int(entry.get("numTrades", 0)),
-                        "timeframe": timeframe,
-                    })
+            if len(trades) < 500:
+                break
+            offset += len(trades)
+            await asyncio.sleep(RATE_LIMIT)
 
-                print(f"  {timeframe}: {len(entries)} wallets fetched")
-                await asyncio.sleep(0.5)
+        if (i + 1) % 10 == 0:
+            print(f"  Scanned trades from {i+1}/{min(len(resolved_markets), MARKETS_TO_SCAN)} markets "
+                  f"({len(wallet_stats)} unique wallets found)")
+        await asyncio.sleep(RATE_LIMIT)
 
-        except Exception as e:
-            print(f"  Error fetching {timeframe} leaderboard: {e}")
+    # Convert to list
+    wallets = []
+    for addr, stats in wallet_stats.items():
+        wallets.append({
+            "address":      addr,
+            "n_trades":     stats["n_trades"],
+            "total_volume": stats["total_volume"],
+            "markets_seen": len(stats["markets_seen"]),
+        })
 
-    # Deduplicate by address
-    seen = set()
-    unique = []
-    for w in wallets:
-        if w["address"] and w["address"] not in seen:
-            seen.add(w["address"])
-            unique.append(w)
-
-    print(f"Total unique wallets from leaderboard: {len(unique)}")
-    return unique
-
-async def fetch_wallet_profile(
-    session: aiohttp.ClientSession,
-    address: str
-) -> dict:
-    """Get additional profile info: join date, total markets."""
-    try:
-        async with session.get(
-            f"{GAMMA_PROFILES}",
-            params={"address": address}
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                profiles = data if isinstance(data, list) else [data]
-                if profiles:
-                    return profiles[0]
-    except Exception:
-        pass
-    return {}
+    print(f"\nTotal unique wallets discovered: {len(wallets)}")
+    return wallets
 
 # -- Filter -------------------------------------------------------------------
 
-def passes_coarse_filter(wallet: dict) -> tuple[bool, str]:
-    """
-    Quick filter before expensive scoring.
-    Returns (passes, reason_if_rejected)
-    """
-    # Must have a valid address
+def passes_filter(wallet: dict) -> tuple[bool, str]:
+    """Quick filter before expensive scoring."""
     if not wallet["address"] or not wallet["address"].startswith("0x"):
         return False, "invalid address"
 
-    # Must have meaningful market count
-    if wallet["n_markets"] < MIN_MARKETS:
-        return False, f"only {wallet['n_markets']} markets (min {MIN_MARKETS})"
+    if wallet["markets_seen"] < MIN_MARKETS:
+        return False, f"only {wallet['markets_seen']} markets (min {MIN_MARKETS})"
 
-    # Reject obvious whale-gamblers: huge profit but tiny market count
-    # e.g. majorexploiter: $3.6M profit, 3 markets
-    if wallet["profit"] > 500_000 and wallet["n_markets"] < 20:
-        return False, f"whale gambler pattern: ${wallet['profit']:,.0f} profit, {wallet['n_markets']} markets"
+    if wallet["total_volume"] < MIN_VOLUME_USD:
+        return False, f"only ${wallet['total_volume']:.0f} volume (min ${MIN_VOLUME_USD:.0f})"
 
     return True, ""
 
@@ -116,17 +157,14 @@ def passes_coarse_filter(wallet: dict) -> tuple[bool, str]:
 def save_wallet_to_db(sb, wallet: dict, score: WalletScore):
     """Upsert wallet and its scores into Supabase."""
     try:
-        # Upsert wallet record
         sb.table("wallets").upsert({
-            "wallet_address": score.wallet_address,
-            "username":       wallet.get("username", ""),
+            "wallet_address":   score.wallet_address,
             "account_age_days": score.account_age_days,
-            "last_active_at": score.computed_at,
-            "is_sharp":       score.tier in ("tier_1_sharp", "tier_2_sharp"),
-            "is_monitored":   score.tier == "tier_1_sharp",
+            "last_active_at":   score.computed_at,
+            "is_sharp":         score.tier in ("tier_1_sharp", "tier_2_sharp"),
+            "is_monitored":     score.tier == "tier_1_sharp",
         }).execute()
 
-        # Upsert composite score
         sb.table("wallet_scores").upsert({
             "wallet_address":  score.wallet_address,
             "composite_score": score.composite_score,
@@ -138,7 +176,6 @@ def save_wallet_to_db(sb, wallet: dict, score: WalletScore):
             "computed_at":     score.computed_at,
         }).execute()
 
-        # Upsert per-category scores
         for cat in score.category_scores.values():
             if cat.n_markets < 3:
                 continue
@@ -175,19 +212,22 @@ async def run_batch():
         client = PolymarketClient(session)
         scorer = WalletScorer(client)
 
-        # 1. Fetch leaderboard
-        leaderboard = await fetch_leaderboard(session)
+        # 1. Discover wallets from resolved markets
+        discovered = await discover_wallets(session)
 
-        # 2. Apply coarse filter
+        # 2. Apply filter
         candidates = []
         rejected = 0
-        for w in leaderboard[:MAX_WALLETS]:
-            passes, reason = passes_coarse_filter(w)
+        for w in discovered:
+            passes, reason = passes_filter(w)
             if passes:
                 candidates.append(w)
             else:
                 rejected += 1
-                print(f"  {w.get('username') or w['address'][:10]}: {reason}")
+
+        # Sort by number of markets seen (most active first)
+        candidates.sort(key=lambda w: w["markets_seen"], reverse=True)
+        candidates = candidates[:MAX_WALLETS]
 
         print(f"\n{len(candidates)} candidates after filter ({rejected} rejected)")
         print("-" * 50)
@@ -196,15 +236,15 @@ async def run_batch():
         results = []
         for i, wallet in enumerate(candidates):
             addr = wallet["address"]
-            name = wallet.get("username") or addr[:10]
 
-            print(f"\n[{i+1}/{len(candidates)}] Scoring {name}...")
+            print(f"\n[{i+1}/{len(candidates)}] Scoring {addr[:12]}... "
+                  f"({wallet['markets_seen']} markets, ${wallet['total_volume']:,.0f} vol)")
 
             try:
                 score = await scorer.score_wallet(addr)
 
                 if score.total_markets == 0:
-                    print(f"  No data returned, skipping")
+                    print(f"  No resolved data, skipping")
                     continue
 
                 print_report(score)
@@ -212,10 +252,9 @@ async def run_batch():
                 results.append((wallet, score))
 
             except Exception as e:
-                print(f"  Failed to score {name}: {e}")
+                print(f"  Failed to score {addr[:12]}: {e}")
                 continue
 
-            # Brief pause between wallets to avoid hammering the API
             await asyncio.sleep(2)
 
         # 4. Summary
@@ -231,15 +270,15 @@ async def run_batch():
         print(f"  Total Scored  : {len(results)}")
         print()
 
-        print("  TOP 10 BY COMPOSITE SCORE:")
-        top10 = sorted(results, key=lambda x: x[1].composite_score, reverse=True)[:10]
-        for rank, (w, s) in enumerate(top10, 1):
-            name = w.get("username") or s.wallet_address[:10]
-            print(f"  {rank:2}. {name:<25} {s.composite_score:5.1f}/100  "
-                  f"{s.tier:<20} {s.total_markets:,} markets")
+        if results:
+            print("  TOP 10 BY COMPOSITE SCORE:")
+            top10 = sorted(results, key=lambda x: x[1].composite_score, reverse=True)[:10]
+            for rank, (w, s) in enumerate(top10, 1):
+                print(f"  {rank:2}. {s.wallet_address[:14]}...  {s.composite_score:5.1f}/100  "
+                      f"{s.tier:<20} {s.total_markets:,} markets")
 
         print("=" * 60)
-        print(f"All results saved to Supabase")
+        print("All results saved to Supabase")
 
 if __name__ == "__main__":
     asyncio.run(run_batch())
