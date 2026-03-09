@@ -27,6 +27,24 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 DATA_API = "https://data-api.polymarket.com"
+GAMMA_API = "https://gamma-api.polymarket.com"
+
+
+def fetch_polymarket_username(address):
+    """Fetch the Polymarket display name for a wallet address."""
+    try:
+        r = requests.get(
+            f"{GAMMA_API}/public-profile",
+            params={"address": address},
+            timeout=10,
+        )
+        if r.ok:
+            data = r.json()
+            name = data.get("name") or data.get("pseudonym")
+            return name if name else None
+    except Exception:
+        pass
+    return None
 
 
 def discover_active_traders(min_trades=5, pages=8):
@@ -178,9 +196,11 @@ def quick_score(address):
             "roi": round(cat_roi, 4),
         }
 
+    username = fetch_polymarket_username(address)
+
     return {
         "address": address,
-        "username": None,
+        "username": username,
         "total_bets": len(bets),
         "total_volume": round(total_wagered, 2),
         "resolved_bets": len(resolved),

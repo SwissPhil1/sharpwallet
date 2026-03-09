@@ -171,8 +171,23 @@
             padding: 16px;
             border-bottom: 1px solid var(--border);
         }
-        .detail-address { color: var(--cyan); font-size: 14px; margin-bottom: 4px; }
+        .detail-address { color: var(--cyan); font-size: 14px; margin-bottom: 4px; word-break: break-all; }
+        .detail-address a { color: var(--cyan); text-decoration: none; }
+        .detail-address a:hover { text-decoration: underline; }
         .detail-label { color: var(--gray); font-size: 11px; }
+        .poly-link {
+            display: inline-block;
+            color: var(--cyan);
+            font-size: 10px;
+            padding: 2px 8px;
+            border: 1px solid var(--cyan);
+            border-radius: 3px;
+            text-decoration: none;
+            margin-left: 8px;
+            opacity: 0.7;
+            transition: opacity 0.15s;
+        }
+        .poly-link:hover { opacity: 1; }
         .detail-metrics {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -562,7 +577,11 @@ function renderWalletList() {
     container.innerHTML = wallets.map((w, i) => {
         const rank = w.rank || i + 1;
         const addr = w.address;
-        const shortAddr = w.label || `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+        const label = w.label || '';
+        // Show real name if label doesn't look like an auto-generated tier_prefix
+        const isTierLabel = /^(elite|sharp|moderate|noise|unknown)_/.test(label);
+        const displayName = (!isTierLabel && label) ? label : `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+        const subLabel = (!isTierLabel && label) ? `${addr.slice(0, 10)}...` : '';
         const clv = (w.clv || 0);
         const wr = (w.win_rate || 0);
         const roi = (w.roi || 0);
@@ -571,8 +590,8 @@ function renderWalletList() {
         return `<div class="wallet-row ${selectedWallet === addr ? 'selected' : ''}" data-addr="${addr}">
             <span class="rank ${rank <= 3 ? 'top3' : ''}">${rank}</span>
             <span>
-                <span class="address">${shortAddr}</span>
-                ${w.label ? `<br><span class="label">${addr.slice(0, 10)}...</span>` : ''}
+                <span class="address">${displayName}</span>
+                ${subLabel ? `<br><span class="label">${subLabel}</span>` : `<br><span class="label">${addr.slice(0, 10)}...</span>`}
             </span>
             <span class="metric ${clv > 0 ? 'positive' : clv < 0 ? 'negative' : 'neutral'}">${clv > 0 ? '+' : ''}${(clv * 100).toFixed(1)}%</span>
             <span class="metric ${wr > 0.52 ? 'positive' : wr < 0.48 ? 'negative' : 'neutral'}">${(wr * 100).toFixed(1)}%</span>
@@ -608,10 +627,18 @@ function renderWalletDetail(addr) {
     const sharpe = w.sharpe_ratio || 0;
     const kelly = w.kelly_fraction || 0;
 
+    const label = w.label || '';
+    const isTierLabel = /^(elite|sharp|moderate|noise|unknown)_/.test(label);
+    const displayName = (!isTierLabel && label) ? label : null;
+    const polyUrl = `https://polymarket.com/profile/${addr}`;
+
     container.innerHTML = `
         <div class="detail-header">
-            <div class="detail-address">${addr}</div>
-            <div class="detail-label">${w.label || 'Unlabeled'} — ${w.total_bets || 0} bets — $${Number(w.total_volume || 0).toLocaleString()} volume</div>
+            <div class="detail-address">
+                <a href="${polyUrl}" target="_blank" rel="noopener">${addr}</a>
+                <a href="${polyUrl}" target="_blank" rel="noopener" class="poly-link">View on Polymarket</a>
+            </div>
+            <div class="detail-label">${displayName || addr.slice(0, 10) + '...'} — ${w.total_bets || 0} bets — $${Number(w.total_volume || 0).toLocaleString()} volume</div>
         </div>
         <div class="detail-metrics">
             <div class="detail-metric">

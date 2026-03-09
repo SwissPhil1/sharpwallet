@@ -184,32 +184,115 @@ def fetch_market_info(condition_id):
 
 
 def categorize_market(title, tags=None):
-    """Categorize a market based on title."""
-    combined = ((title or "") + " " + " ".join(tags or [])).lower()
-    if any(w in combined for w in ["trump", "biden", "election", "congress", "president", "democrat", "republican", "vote", "senate", "governor"]):
-        return "politics"
-    if any(w in combined for w in ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "token", "defi"]):
-        return "crypto"
-    # Sports: match league names, common patterns like "X vs. Y", spreads, team names
-    if any(w in combined for w in ["nfl", "nba", "mlb", "nhl", "soccer", "football", "basketball",
-            "ufc", "sports", "tennis", "boxing", "super bowl", "championship", "playoffs",
-            "spread:", "moneyline", "over/under"]):
-        return "sports"
-    # "Team vs. Team" pattern (common in Polymarket sports)
+    """Categorize a market based on title and tags."""
     import re
+    combined = ((title or "") + " " + " ".join(tags or [])).lower()
+
+    # Politics / Geopolitics
+    if any(w in combined for w in [
+        "trump", "biden", "election", "congress", "president", "democrat", "republican",
+        "vote", "senate", "governor", "political", "gop", "dnc", "rnc", "kamala",
+        "desantis", "vance", "obama", "pelosi", "mcconnell", "newsom", "gavin",
+        "midterm", "primary", "ballot", "electoral", "impeach", "scotus",
+        "supreme court", "legislation", "bill pass", "executive order",
+        "cabinet", "secretary of", "attorney general", "speaker of the house",
+        "government shutdown", "debt ceiling", "tariff", "sanctions",
+        "nato", "ukraine", "russia", "china", "iran", "israel", "gaza", "war",
+        "ceasefire", "invasion", "missile", "nuclear", "geopolit", "diplomacy",
+        "un resolution", "peace deal", "military", "troops", "border",
+        "immigration", "refugee", "asylum", "caravan",
+        "approval rating", "poll", "favorability",
+    ]):
+        return "politics"
+
+    # Crypto / Web3
+    if any(w in combined for w in [
+        "bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "sol",
+        "token", "defi", "nft", "blockchain", "altcoin", "memecoin", "meme coin",
+        "dogecoin", "doge", "shiba", "pepe", "xrp", "ripple", "cardano", "ada",
+        "polkadot", "avalanche avax", "matic", "polygon", "binance", "bnb",
+        "coinbase", "sec crypto", "etf bitcoin", "bitcoin etf", "eth etf",
+        "halving", "mining", "staking", "airdrop", "layer 2", "rollup",
+        "uniswap", "opensea", "web3", "dao ", "decentralized",
+        "$btc", "$eth", "$sol", "market cap crypto",
+    ]):
+        return "crypto"
+
+    # Sports
+    if any(w in combined for w in [
+        "nfl", "nba", "mlb", "nhl", "mls", "epl", "premier league", "la liga",
+        "bundesliga", "serie a", "ligue 1", "champions league", "uefa",
+        "soccer", "football", "basketball", "baseball", "hockey", "tennis",
+        "ufc", "mma", "boxing", "golf", "pga", "f1", "formula 1", "nascar",
+        "cricket", "ipl", "rugby", "olympics", "olympic", "world cup",
+        "super bowl", "championship", "playoffs", "finals", "semifinal",
+        "spread:", "moneyline", "over/under", "point spread", "total points",
+        "win the ", "wins the ", "make the playoffs", "win the series",
+        "mvp", "rookie of the year", "scoring leader", "batting average",
+        "touchdown", "home run", "goal scorer", "grand slam",
+        "world series", "stanley cup", "march madness", "ncaa",
+    ]):
+        return "sports"
+    # "X vs Y" or "X vs. Y" pattern (common in sports markets)
     if re.search(r'\b\w+\s+vs\.?\s+\w+\b', combined):
         return "sports"
-    # Common sports team words
-    if any(w in combined for w in ["win on 20", "oilers", "knights", "celtics", "cavaliers",
-            "lakers", "warriors", "bears", "rams", "seahawks", "chiefs", "eagles",
-            "hurricanes", "flames", "bruins", "penguins", "lightning", "sabres",
-            "capitals", "devils", "islanders", "sharks", "blackhawks", "stars",
-            "wild", "avalanche", "blues", "ducks", "pelicans", "hawks"]):
+    # Team names
+    if any(w in combined for w in [
+        "oilers", "knights", "celtics", "cavaliers", "lakers", "warriors",
+        "bears", "rams", "seahawks", "chiefs", "eagles", "49ers", "packers",
+        "cowboys", "steelers", "ravens", "bills", "dolphins", "patriots",
+        "hurricanes", "flames", "bruins", "penguins", "lightning", "sabres",
+        "capitals", "devils", "islanders", "sharks", "blackhawks", "stars",
+        "wild", "blues", "ducks", "pelicans", "hawks", "nuggets",
+        "bucks", "suns", "heat", "knicks", "nets", "sixers", "mavericks",
+        "yankees", "dodgers", "red sox", "astros", "braves", "padres",
+        "manchester united", "man city", "liverpool", "chelsea", "arsenal",
+        "real madrid", "barcelona", "bayern", "psg", "juventus", "inter milan",
+    ]):
         return "sports"
-    if any(w in combined for w in ["movie", "oscar", "grammy", "celebrity", "entertainment"]):
+
+    # Entertainment / Culture / Pop culture
+    if any(w in combined for w in [
+        "movie", "oscar", "grammy", "emmy", "golden globe", "celebrity",
+        "entertainment", "netflix", "disney", "box office", "album",
+        "spotify", "taylor swift", "kanye", "drake", "beyonce",
+        "tv show", "series finale", "award", "nominee", "billboard",
+        "viral", "tiktok", "youtube", "streamer", "podcast",
+        "kardashian", "elon musk tweet", "twitter", "x.com",
+    ]):
         return "entertainment"
-    if any(w in combined for w in ["ai", "openai", "climate", "nasa", "science", "spacex"]):
-        return "science"
+
+    # Science / Tech / AI
+    if any(w in combined for w in [
+        "ai ", "openai", "chatgpt", "gpt-", "claude", "gemini", "llm",
+        "artificial intelligence", "machine learning", "deepmind", "anthropic",
+        "climate", "nasa", "science", "spacex", "launch", "rocket", "mars",
+        "moon landing", "asteroid", "vaccine", "pandemic", "covid", "virus",
+        "fda approval", "drug trial", "medical", "gene therapy", "crispr",
+        "quantum", "fusion energy", "breakthrough", "study finds",
+        "apple", "google", "microsoft", "meta", "amazon", "nvidia", "tesla stock",
+        "ipo ", "tech stock", "semiconductor", "chip",
+    ]):
+        return "science_tech"
+
+    # Economy / Finance (non-crypto)
+    if any(w in combined for w in [
+        "fed ", "federal reserve", "interest rate", "inflation", "cpi",
+        "gdp", "recession", "unemployment", "jobs report", "stock market",
+        "s&p 500", "dow jones", "nasdaq", "treasury", "bond yield",
+        "oil price", "gold price", "commodity", "trade war", "deficit",
+        "housing market", "real estate", "mortgage rate",
+    ]):
+        return "economy"
+
+    # Weather / Natural events
+    if any(w in combined for w in [
+        "hurricane", "earthquake", "tornado", "wildfire", "flood",
+        "temperature", "weather", "storm", "el nino", "drought",
+        "hottest", "coldest", "record heat", "snowfall",
+    ]):
+        return "weather"
+
     return "other"
 
 
@@ -461,10 +544,25 @@ def analyze_wallet(address, profile=None):
         elif roi > 0.02:
             tier = "sharp"
 
+    # Fetch Polymarket username if we don't have one
+    username = profile.get("username") if profile else None
+    if not username:
+        try:
+            r = requests.get(
+                f"{GAMMA_URL}/public-profile",
+                params={"address": address},
+                timeout=10,
+            )
+            if r.ok:
+                pdata = r.json()
+                username = pdata.get("name") or pdata.get("pseudonym")
+        except Exception:
+            pass
+
     # Build report
     report = {
         "address": address,
-        "username": profile.get("username") if profile else None,
+        "username": username,
         "total_bets": total,
         "total_volume": round(total_wagered, 2),
         "resolved_bets": len(resolved),
