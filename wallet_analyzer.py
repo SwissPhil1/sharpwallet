@@ -1,586 +1,669 @@
 """
-SharpWallet -- Wallet Analyzer
-Pulls complete trade history for a wallet from Polymarket's public data API
-and calculates CLV, PnL, calibration, and composite sharp score.
+Wallet Analyzer — analyze a specific Polymarket wallet by username or address.
 
 Usage:
-python wallet_analyzer.py --wallet 0xebd9018611387df205fc3931bcaf988e897883ea
-python wallet_analyzer.py --wallet 0x... --save-db   # also write to Supabase
-python wallet_analyzer.py --wallet 0x... --output-json scores.json
+    python wallet_analyzer.py kch123              # by Polymarket username
+    python wallet_analyzer.py 0xabc123...         # by wallet address
+    python wallet_analyzer.py kch123 --save       # analyze + save to Supabase
 """
-
-import asyncio
-import aiohttp
-import argparse
-import json
-import math
 import os
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
-from typing import Optional
+import sys
+import json
+import time
+import math
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from collections import defaultdict
 
-try:
-    from supabase import create_client
-except Exception:
-    create_client = None
+import requests
+from dotenv import load_dotenv
 
-# -- Configuration ------------------------------------------------------------
+load_dotenv(Path(__file__).parent / ".env")
 
-DATA_API  = "https://data-api.polymarket.com"
-GAMMA_API = "https://gamma-api.polymarket.com"
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ["SUPABASE_ANON_KEY"]
+GAMMA_URL = os.environ.get("POLYMARKET_GAMMA_URL", "https://gamma-api.polymarket.com")
+CLOB_URL = os.environ.get("POLYMARKET_API_URL", "https://clob.polymarket.com")
 
-PAGE_SIZE            = 500
-RATE_LIMIT           = 0.15   # seconds between requests
-DECAY_HALF_LIFE_DAYS = 180    # recency weighting: 6 months = 50% weight
+# Lazy-init Supabase client (only if --save)
+_supabase = None
 
-# Bayesian prior for win rate shrinkage (conservative: assume 50% baseline)
-PRIOR_ALPHA = 10
-PRIOR_BETA  = 10
+def get_supabase():
+    global _supabase
+    if _supabase is None:
+        from supabase import create_client
+        _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase
 
-# Composite score weights (must sum to 1.0)
-WEIGHTS = {
-    "clv":        0.35,
-    "pnl":        0.25,
-    "calibration": 0.20,
-    "win_rate":   0.20,
-}
 
-# -- Data Models --------------------------------------------------------------
+# ── Polymarket API ──────────────────────────────────────────
 
-@dataclass
-class Trade:
-    condition_id: str
-    asset_id:     str          # token ID on Polymarket
-    side:         str          # "BUY" or "SELL"
-    price:        float        # entry price (0.0-1.0)
-    size:         float        # USDC amount
-    timestamp:    datetime
-    title:        str = ""
-    outcome:      str = ""
-    outcome_index: int = 0
+def resolve_address(identifier):
+    """Resolve a username or address to a wallet address + profile info."""
+    # Already an address
+    if identifier.startswith("0x") and len(identifier) >= 40:
+        return identifier, {"username": None, "address": identifier}
 
-@dataclass
-class Position:
-    condition_id:   str
-    asset_id:       str
-    outcome:        str
-    outcome_index:  int
-    size:           float
-    avg_price:      float
-    initial_value:  float
-    current_value:  float
-    cash_pnl:       float
-    realized_pnl:   float
-    cur_price:      float
-    redeemable:     bool
-    title:          str = ""
-    category:       str = "unknown"
-    end_date:       str = ""
+    # Look up by username via Gamma API
+    try:
+        r = requests.get(f"{GAMMA_URL}/users", params={"username": identifier}, timeout=10)
+        if r.ok:
+            users = r.json()
+            if isinstance(users, list) and users:
+                u = users[0]
+                return u.get("proxyWallet") or u.get("address") or u.get("id"), u
+            elif isinstance(users, dict) and users.get("address"):
+                return users.get("proxyWallet") or users["address"], users
+    except Exception as e:
+        print(f"  Warning: Gamma user lookup failed: {e}")
 
-@dataclass
-class CategoryScore:
-    category:       str
-    n_markets:      int   = 0
-    n_wins:         int   = 0
-    total_staked:   float = 0.0
-    total_pnl:      float = 0.0
-    clv_values:     list  = field(default_factory=list)
-    calibration_buckets: dict = field(default_factory=lambda: defaultdict(lambda: {"n": 0, "wins": 0}))
+    # Try profile endpoint
+    try:
+        r = requests.get(f"{GAMMA_URL}/profiles/{identifier}", timeout=10)
+        if r.ok:
+            u = r.json()
+            addr = u.get("proxyWallet") or u.get("address") or u.get("id")
+            if addr:
+                return addr, u
+    except Exception:
+        pass
 
-    @property
-    def win_rate_raw(self) -> float:
-        return self.n_wins / self.n_markets if self.n_markets > 0 else 0.0
+    # Try CLOB API user lookup
+    try:
+        r = requests.get(f"{CLOB_URL}/profile/{identifier}", timeout=10)
+        if r.ok:
+            u = r.json()
+            addr = u.get("proxyWallet") or u.get("address")
+            if addr:
+                return addr, u
+    except Exception:
+        pass
 
-    @property
-    def win_rate_bayesian(self) -> float:
-        return (PRIOR_ALPHA + self.n_wins) / (PRIOR_ALPHA + PRIOR_BETA + self.n_markets)
+    # Try scraping the Polymarket profile page
+    try:
+        import re
+        r = requests.get(f"https://polymarket.com/@{identifier}", timeout=10, allow_redirects=True)
+        if r.ok:
+            # Look for proxyWallet in page source
+            match = re.search(r'"proxyWallet"\s*:\s*"(0x[a-fA-F0-9]{40})"', r.text)
+            if match:
+                addr = match.group(1)
+                return addr, {"username": identifier, "address": addr}
+            # Fallback: any 0x address
+            addrs = re.findall(r'0x[a-fA-F0-9]{40}', r.text)
+            if addrs:
+                return addrs[0], {"username": identifier, "address": addrs[0]}
+    except Exception:
+        pass
 
-    @property
-    def avg_clv(self) -> float:
-        return sum(self.clv_values) / len(self.clv_values) if self.clv_values else 0.0
+    # Could be a partial address or label — return as-is
+    return identifier, {"username": identifier, "address": identifier}
 
-    @property
-    def pnl_per_market(self) -> float:
-        return self.total_pnl / self.n_markets if self.n_markets > 0 else 0.0
 
-    @property
-    def calibration_score(self) -> float:
-        """Brier-style calibration: 1.0 = perfect, 0.0 = terrible."""
-        if not self.calibration_buckets:
-            return 0.5
+DATA_API = "https://data-api.polymarket.com"
 
-        total_error = 0.0
-        total_n = 0
-        for bucket_mid, data in self.calibration_buckets.items():
-            n = data["n"]
-            if n == 0:
-                continue
-            actual_rate = data["wins"] / n
-            expected_rate = bucket_mid
-            total_error += n * (actual_rate - expected_rate) ** 2
-            total_n += n
 
-        if total_n == 0:
-            return 0.5
+def fetch_user_trades(address, limit=2000):
+    """Fetch trades from Polymarket data API with pagination."""
+    all_trades = []
+    cursor = None
+    max_pages = max(1, limit // 200)
 
-        mse = total_error / total_n
-        return max(0.0, 1.0 - (mse / 0.25))
-
-@dataclass
-class WalletScore:
-    wallet_address:  str
-    total_markets:   int   = 0
-    total_staked:    float = 0.0
-    total_pnl:       float = 0.0
-    account_age_days: int  = 0
-    category_scores: dict  = field(default_factory=dict)
-    composite_score: float = 0.0
-    tier:            str   = "unranked"
-    computed_at:     str   = ""
-
-# -- API Client (uses public data-api, no auth required) ----------------------
-
-class PolymarketClient:
-    def __init__(self, session: aiohttp.ClientSession):
-        self.session = session
-        self._market_cache: dict[str, dict] = {}
-
-    async def _get(self, url: str, params: dict = None) -> dict | list:
-        await asyncio.sleep(RATE_LIMIT)
-        async with self.session.get(url, params=params) as resp:
-            if resp.status == 429:
-                print("  Rate limited -- waiting 5s...")
-                await asyncio.sleep(5)
-                return await self._get(url, params)
-            resp.raise_for_status()
-            return await resp.json()
-
-    async def get_all_trades(self, wallet: str) -> list[Trade]:
-        """Pull every trade for a wallet from the public data API."""
-        trades = []
-        offset = 0
-
-        print(f"\nFetching trades for {wallet[:10]}...")
-
-        while True:
-            data = await self._get(f"{DATA_API}/trades", params={
-                "user": wallet,
-                "limit": PAGE_SIZE,
-                "offset": offset,
-            })
-
-            if not isinstance(data, list) or not data:
-                break
-
-            for r in data:
-                try:
-                    trades.append(Trade(
-                        condition_id  = r["conditionId"],
-                        asset_id      = r["asset"],
-                        side          = r["side"],
-                        price         = float(r["price"]),
-                        size          = float(r["size"]),
-                        timestamp     = datetime.fromtimestamp(
-                                            int(r["timestamp"]), tz=timezone.utc
-                                        ),
-                        title         = r.get("title", ""),
-                        outcome       = r.get("outcome", ""),
-                        outcome_index = int(r.get("outcomeIndex", 0)),
-                    ))
-                except (KeyError, ValueError) as e:
-                    print(f"  Skipping malformed trade record: {e}")
-                    continue
-
-            print(f"  Fetched {len(data)} trades (total: {len(trades)})")
-
-            if len(data) < PAGE_SIZE:
-                break
-            offset += len(data)
-
-        print(f"Total trades fetched: {len(trades)}")
-        return trades
-
-    async def get_positions(self, wallet: str) -> list[Position]:
-        """Pull all positions (with pre-computed PnL) from the data API."""
-        positions = []
-        offset = 0
-
-        while True:
-            data = await self._get(f"{DATA_API}/positions", params={
-                "user": wallet,
-                "sizeThreshold": 0,
-                "limit": PAGE_SIZE,
-                "offset": offset,
-            })
-
-            if not isinstance(data, list) or not data:
-                break
-
-            for r in data:
-                try:
-                    positions.append(Position(
-                        condition_id  = r["conditionId"],
-                        asset_id      = r["asset"],
-                        outcome       = r.get("outcome", ""),
-                        outcome_index = int(r.get("outcomeIndex", 0)),
-                        size          = float(r.get("size", 0)),
-                        avg_price     = float(r.get("avgPrice", 0)),
-                        initial_value = float(r.get("initialValue", 0)),
-                        current_value = float(r.get("currentValue", 0)),
-                        cash_pnl      = float(r.get("cashPnl", 0)),
-                        realized_pnl  = float(r.get("realizedPnl", 0)),
-                        cur_price     = float(r.get("curPrice", 0)),
-                        redeemable    = bool(r.get("redeemable", False)),
-                        title         = r.get("title", ""),
-                        end_date      = r.get("endDate", ""),
-                    ))
-                except (KeyError, ValueError):
-                    continue
-
-            if len(data) < PAGE_SIZE:
-                break
-            offset += len(data)
-
-        return positions
-
-    async def get_market(self, condition_id: str) -> dict:
-        """Fetch market metadata from Gamma API (for category, outcomes, etc)."""
-        if condition_id in self._market_cache:
-            return self._market_cache[condition_id]
-
+    offset = 0
+    for page in range(max_pages):
+        params = {"user": address, "limit": 200, "offset": offset}
         try:
-            data = await self._get(f"{GAMMA_API}/markets", params={
-                "conditionId": condition_id,
-                "limit": 1,
-            })
-            if isinstance(data, list) and data:
-                market = data[0]
-                self._market_cache[condition_id] = market
-                return market
+            r = requests.get(f"{DATA_API}/trades", params=params, timeout=15)
+            if not r.ok:
+                break
+            data = r.json()
+            if not isinstance(data, list) or not data:
+                break
+            all_trades.extend(data)
+            offset += len(data)
+            if len(data) < 200:
+                break
         except Exception as e:
-            print(f"  Could not fetch market {condition_id[:16]}...: {e}")
+            print(f"  Warning: trade fetch page {page}: {e}")
+            break
+        time.sleep(0.3)
 
-        return {}
+    # Deduplicate by transaction hash + asset
+    seen = set()
+    unique = []
+    for t in all_trades:
+        tid = t.get("transactionHash", "") + t.get("asset", "") + str(t.get("timestamp", ""))
+        if tid not in seen:
+            seen.add(tid)
+            unique.append(t)
 
-# -- CLV Calculator -----------------------------------------------------------
+    return unique
 
-def calculate_clv(entry_price: float, closing_price: float, side: str) -> float:
-    """
-    Closing Line Value: did you beat the market's final assessment?
-    CLV > 0 = edge over the crowd. CLV < 0 = market moved against you.
-    """
+
+def fetch_user_positions(address):
+    """Fetch current open positions from data API."""
+    try:
+        r = requests.get(f"{DATA_API}/positions", params={"user": address, "sizeThreshold": 0}, timeout=15)
+        if r.ok:
+            data = r.json()
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def fetch_user_stats(address):
+    """Fetch aggregate stats from Polymarket profile."""
+    stats = {}
+    try:
+        r = requests.get(f"https://polymarket.com/api/profile/userData?address={address}", timeout=10)
+        if r.ok:
+            stats["profile"] = r.json()
+    except Exception:
+        pass
+    try:
+        r = requests.get(f"{DATA_API}/positions", params={"user": address, "sizeThreshold": 0}, timeout=10)
+        if r.ok:
+            stats["positions"] = r.json()
+    except Exception:
+        pass
+    return stats
+
+
+def fetch_market_info(condition_id):
+    """Get market metadata from Gamma API."""
+    try:
+        r = requests.get(f"{GAMMA_URL}/markets", params={"condition_id": condition_id}, timeout=10)
+        if r.ok:
+            markets = r.json()
+            if isinstance(markets, list) and markets:
+                return markets[0]
+    except Exception:
+        pass
+    return None
+
+
+def categorize_market(title, tags=None):
+    """Categorize a market based on title."""
+    combined = ((title or "") + " " + " ".join(tags or [])).lower()
+    if any(w in combined for w in ["trump", "biden", "election", "congress", "president", "democrat", "republican", "vote", "senate", "governor"]):
+        return "politics"
+    if any(w in combined for w in ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "token", "defi"]):
+        return "crypto"
+    # Sports: match league names, common patterns like "X vs. Y", spreads, team names
+    if any(w in combined for w in ["nfl", "nba", "mlb", "nhl", "soccer", "football", "basketball",
+            "ufc", "sports", "tennis", "boxing", "super bowl", "championship", "playoffs",
+            "spread:", "moneyline", "over/under"]):
+        return "sports"
+    # "Team vs. Team" pattern (common in Polymarket sports)
+    import re
+    if re.search(r'\b\w+\s+vs\.?\s+\w+\b', combined):
+        return "sports"
+    # Common sports team words
+    if any(w in combined for w in ["win on 20", "oilers", "knights", "celtics", "cavaliers",
+            "lakers", "warriors", "bears", "rams", "seahawks", "chiefs", "eagles",
+            "hurricanes", "flames", "bruins", "penguins", "lightning", "sabres",
+            "capitals", "devils", "islanders", "sharks", "blackhawks", "stars",
+            "wild", "avalanche", "blues", "ducks", "pelicans", "hawks"]):
+        return "sports"
+    if any(w in combined for w in ["movie", "oscar", "grammy", "celebrity", "entertainment"]):
+        return "entertainment"
+    if any(w in combined for w in ["ai", "openai", "climate", "nasa", "science", "spacex"]):
+        return "science"
+    return "other"
+
+
+# ── Sharpness metrics ──────────────────────────────────────
+
+def compute_clv(entry_price, closing_price, side):
+    """Closing Line Value."""
+    if closing_price is None or entry_price is None:
+        return 0
     if side == "BUY":
-        return closing_price - entry_price
-    else:
-        return entry_price - closing_price
+        return float(closing_price - entry_price)
+    return float(entry_price - closing_price)
 
-def get_calibration_bucket(price: float) -> float:
-    """Map a price to its bucket midpoint (0.05, 0.15, ..., 0.95)."""
-    bucket = math.floor(price * 10) / 10
-    return min(0.9, max(0.0, bucket)) + 0.05
 
-def recency_weight(ts: datetime) -> float:
-    """Exponential decay: today=1.0, 6mo=0.5, 12mo=0.25."""
-    age_days = (datetime.now(timezone.utc) - ts).days
-    return math.exp(-math.log(2) * age_days / DECAY_HALF_LIFE_DAYS)
+def compute_calibration(bets_with_prices):
+    """Calibration score (lower = better)."""
+    if not bets_with_prices:
+        return 0.5
+    buckets = defaultdict(list)
+    for price, won in bets_with_prices:
+        bucket = min(9, int(price * 10))
+        buckets[bucket].append(1 if won else 0)
+    total_error = 0
+    count = 0
+    for bucket, outcomes in buckets.items():
+        implied = (bucket + 0.5) / 10
+        actual = sum(outcomes) / len(outcomes)
+        total_error += abs(actual - implied)
+        count += 1
+    return round(total_error / max(count, 1), 4) if count else 0.5
 
-# -- Scorer -------------------------------------------------------------------
 
-class WalletScorer:
-    def __init__(self, client: PolymarketClient):
-        self.client = client
+def assign_tier(clv, win_rate, total_bets):
+    if total_bets < 5:
+        return "unknown"
+    if clv > 0.05 and win_rate > 0.55:
+        return "elite"
+    if clv > 0.02 and win_rate > 0.52:
+        return "sharp"
+    if clv > 0 and win_rate > 0.48:
+        return "moderate"
+    return "noise"
 
-    async def score_wallet(self, wallet: str) -> WalletScore:
-        score = WalletScore(wallet_address=wallet)
 
-        # Fetch trades and positions in parallel
-        trades, positions = await asyncio.gather(
-            self.client.get_all_trades(wallet),
-            self.client.get_positions(wallet),
-        )
+# ── Analysis pipeline ──────────────────────────────────────
 
-        if not trades and not positions:
-            print("No trades found for this wallet.")
-            return score
+def analyze_wallet(address, profile=None):
+    """Full analysis of a single wallet. Returns structured report dict."""
+    print(f"\n{'=' * 60}")
+    print(f"WALLET ANALYSIS: {address}")
+    if profile and profile.get("username"):
+        print(f"Username: {profile['username']}")
+    print(f"{'=' * 60}")
 
-        # Build position lookup: conditionId -> Position
-        pos_by_condition: dict[str, list[Position]] = defaultdict(list)
-        for p in positions:
-            pos_by_condition[p.condition_id].append(p)
+    # Fetch trades
+    print("\n[1/4] Fetching trade history...")
+    trades = fetch_user_trades(address)
+    print(f"  Found {len(trades)} trades")
 
-        # Group trades by market (conditionId)
-        by_market: dict[str, list[Trade]] = defaultdict(list)
-        for t in trades:
-            by_market[t.condition_id].append(t)
+    if not trades:
+        print("\n  No trades found for this wallet.")
+        print("  This could mean:")
+        print("    - The username/address is incorrect")
+        print("    - The wallet has no CLOB trades (may use AMM)")
+        print("    - API rate limiting")
+        return None
 
-        score.total_markets = len(by_market)
-        if trades:
-            score.account_age_days = (
-                datetime.now(timezone.utc) - min(t.timestamp for t in trades)
-            ).days
+    # Fetch positions (for PnL data)
+    print("\n[2/4] Fetching open positions...")
+    positions = fetch_user_positions(address)
+    print(f"  Found {len(positions)} open positions")
 
-        print(f"\nScoring {score.total_markets} markets...")
+    # Build position PnL map
+    position_pnl = {}
+    for p in positions:
+        cid = p.get("conditionId", "")
+        position_pnl[cid] = {
+            "cashPnl": float(p.get("cashPnl", 0) or 0),
+            "percentPnl": float(p.get("percentPnl", 0) or 0),
+            "currentValue": float(p.get("currentValue", 0) or 0),
+            "initialValue": float(p.get("initialValue", 0) or 0),
+            "curPrice": float(p.get("curPrice", 0) or 0),
+            "avgPrice": float(p.get("avgPrice", 0) or 0),
+        }
 
-        cat_scores: dict[str, CategoryScore] = defaultdict(
-            lambda: CategoryScore(category="unknown")
-        )
+    # Process trades (data API already includes market info)
+    print("\n[3/4] Processing trades...")
+    bets = []
 
-        for i, (condition_id, market_trades) in enumerate(by_market.items()):
-            if i % 50 == 0 and i > 0:
-                print(f"  Processing market {i}/{score.total_markets}...")
+    for i, t in enumerate(trades):
+        price = float(t.get("price", 0) or 0)
+        size = float(t.get("size", 0) or 0)
+        side = t.get("side", "BUY")
+        outcome = t.get("outcome", "Yes")
+        ts = t.get("timestamp")
 
-            # Get market metadata for category
-            market_meta = await self.client.get_market(condition_id)
-            category = (market_meta.get("category") or "unknown").lower()
-
-            # Check if market is resolved via positions or outcomePrices
-            market_positions = pos_by_condition.get(condition_id, [])
-
-            # Determine resolution from outcomePrices
-            outcome_prices_str = market_meta.get("outcomePrices", "[]")
-            try:
-                outcome_prices = json.loads(outcome_prices_str) if isinstance(outcome_prices_str, str) else outcome_prices_str
-                is_resolved = any(float(p) >= 0.99 for p in outcome_prices)
-            except (json.JSONDecodeError, ValueError, TypeError):
-                is_resolved = False
-
-            if not is_resolved:
-                continue
-
-            # Find winning outcome index
-            winning_idx = None
-            try:
-                for idx, p in enumerate(outcome_prices):
-                    if float(p) >= 0.99:
-                        winning_idx = idx
-                        break
-            except (ValueError, TypeError):
-                pass
-
-            # Get buy trades for this market
-            buy_trades = [t for t in market_trades if t.side == "BUY"]
-            if not buy_trades:
-                continue
-
-            # Net position
-            total_bought = sum(t.size for t in market_trades if t.side == "BUY")
-            total_sold   = sum(t.size for t in market_trades if t.side == "SELL")
-            net_staked   = max(0, total_bought - total_sold)
-
-            # Average entry price (weighted by size)
-            avg_entry = sum(t.price * t.size for t in buy_trades) / total_bought
-
-            # Did they win? Check if their outcome matches the winner
-            primary_outcome_idx = buy_trades[0].outcome_index
-            outcome_won = (primary_outcome_idx == winning_idx) if winning_idx is not None else None
-
-            # PnL from positions (pre-computed by Polymarket)
-            pnl = None
-            if market_positions:
-                pnl = sum(p.cash_pnl for p in market_positions)
-            elif outcome_won is True:
-                pnl = total_bought * (1.0 - avg_entry)
-            elif outcome_won is False:
-                pnl = -net_staked * avg_entry
-
-            # CLV: use curPrice from position as closing price proxy
-            clv = None
-            if market_positions:
-                # Use the position's current price as closing price
-                closing_price = market_positions[0].cur_price
-                if closing_price > 0:
-                    clv = calculate_clv(avg_entry, closing_price, "BUY")
-
-            # Recency weight
-            latest_trade = max(market_trades, key=lambda t: t.timestamp)
-            weight = recency_weight(latest_trade.timestamp)
-
-            # Update category score
-            cat = cat_scores[category]
-            cat.category = category
-            cat.n_markets += 1
-            cat.total_staked += net_staked * weight
-
-            if pnl is not None:
-                cat.total_pnl += pnl * weight
-                score.total_pnl += pnl
-
-            if outcome_won is True:
-                cat.n_wins += 1
-
-            if clv is not None:
-                cat.clv_values.append(clv * weight)
-
-            # Calibration bucket
-            bucket = get_calibration_bucket(avg_entry)
-            cat.calibration_buckets[bucket]["n"] += 1
-            if outcome_won:
-                cat.calibration_buckets[bucket]["wins"] += 1
-
-            score.total_staked += net_staked
-
-        score.category_scores = dict(cat_scores)
-        score.composite_score = self._compute_composite(score)
-        score.tier = self._assign_tier(score)
-        score.computed_at = datetime.now(timezone.utc).isoformat()
-
-        return score
-
-    def _compute_composite(self, score: WalletScore) -> float:
-        """Weighted composite across all categories, normalized 0-100."""
-        if not score.category_scores:
-            return 0.0
-
-        total_markets = sum(c.n_markets for c in score.category_scores.values())
-        if total_markets == 0:
-            return 0.0
-
-        weighted_clv         = 0.0
-        weighted_pnl         = 0.0
-        weighted_calibration = 0.0
-        weighted_winrate     = 0.0
-
-        for cat in score.category_scores.values():
-            w = cat.n_markets / total_markets
-
-            norm_clv = min(1.0, max(0.0, (cat.avg_clv + 0.15) / 0.30))
-            norm_pnl = min(1.0, max(0.0, cat.pnl_per_market / 5000))
-
-            weighted_clv         += w * norm_clv
-            weighted_pnl         += w * norm_pnl
-            weighted_calibration += w * cat.calibration_score
-            weighted_winrate     += w * cat.win_rate_bayesian
-
-        composite = (
-            WEIGHTS["clv"]         * weighted_clv +
-            WEIGHTS["pnl"]         * weighted_pnl +
-            WEIGHTS["calibration"] * weighted_calibration +
-            WEIGHTS["win_rate"]    * weighted_winrate
-        )
-
-        return round(composite * 100, 2)
-
-    def _assign_tier(self, score: WalletScore) -> str:
-        if score.total_markets < 15:
-            return "insufficient_data"
-        elif score.total_markets < 30:
-            return "watch"
-        elif score.composite_score >= 75 and score.total_markets >= 100:
-            return "tier_1_sharp"
-        elif score.composite_score >= 60 and score.total_markets >= 50:
-            return "tier_2_sharp"
-        elif score.composite_score >= 45:
-            return "tier_3_emerging"
+        # Parse timestamp
+        if ts:
+            if isinstance(ts, (int, float)):
+                ts = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            elif isinstance(ts, str) and ts.isdigit():
+                ts = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
         else:
-            return "not_sharp"
+            ts = datetime.now(timezone.utc).isoformat()
 
-# -- Reporter -----------------------------------------------------------------
+        title = t.get("title", "")
+        slug = t.get("slug", t.get("eventSlug", ""))
+        condition_id = t.get("conditionId", "")
+        category = categorize_market(title)
 
-def print_report(score: WalletScore):
-    print("\n" + "=" * 60)
-    print(f"  WALLET SCORE REPORT")
-    print(f"  {score.wallet_address}")
-    print("=" * 60)
-    print(f"  Composite Score : {score.composite_score:.1f} / 100")
-    print(f"  Tier            : {score.tier.upper()}")
-    print(f"  Total Markets   : {score.total_markets:,}")
-    print(f"  Total Staked    : ${score.total_staked:,.0f}")
-    print(f"  Total PnL       : ${score.total_pnl:,.0f}")
-    print(f"  Account Age     : {score.account_age_days} days")
-    print()
-    print("  CATEGORY BREAKDOWN:")
-    print(f"  {'Category':<20} {'Markets':>7} {'Win%':>6} {'Avg CLV':>8} {'PnL/Mkt':>10} {'Calibr':>8}")
-    print(f"  {'-'*20} {'-'*7} {'-'*6} {'-'*8} {'-'*10} {'-'*8}")
+        # Check if we have position data for PnL
+        pos = position_pnl.get(condition_id, {})
+        closing_price = pos.get("curPrice") if pos else None
 
-    sorted_cats = sorted(
-        score.category_scores.values(),
-        key=lambda c: c.n_markets,
-        reverse=True
+        # Determine win using position PnL
+        won = None
+        if pos and pos.get("percentPnl", 0) != 0:
+            won = pos["cashPnl"] > 0
+
+        amount_usd = round(price * size, 2)
+
+        bets.append({
+            "address": address,
+            "market_slug": slug[:200],
+            "market_title": title[:500],
+            "category": category,
+            "outcome": outcome,
+            "side": side,
+            "price": price,
+            "size": size,
+            "amount_usd": amount_usd,
+            "timestamp": ts,
+            "resolved": closing_price is not None and closing_price in (0, 1),
+            "won": won,
+            "closing_price": closing_price,
+            "clv": compute_clv(price, closing_price, side) if closing_price else None,
+        })
+
+    # Compute metrics
+    print(f"\n[4/4] Computing sharpness metrics...")
+
+    resolved = [b for b in bets if b["resolved"] and b["won"] is not None]
+    total = len(bets)
+    wins = sum(1 for b in resolved if b["won"])
+    win_rate = wins / max(len(resolved), 1) if resolved else 0
+
+    # CLV
+    clvs = [b["clv"] for b in bets if b["clv"] is not None]
+    avg_clv = sum(clvs) / max(len(clvs), 1) if clvs else 0
+
+    # ROI
+    total_wagered = sum(b["amount_usd"] for b in bets if b["amount_usd"])
+    total_pnl = sum(
+        (1 - b["price"]) * b["size"] if b["won"] else -b["price"] * b["size"]
+        for b in resolved if b["won"] is not None
     )
+    roi = total_pnl / max(total_wagered, 1)
 
-    for cat in sorted_cats:
-        if cat.n_markets < 3:
-            continue
-        print(
-            f"  {cat.category:<20} "
-            f"{cat.n_markets:>7,} "
-            f"{cat.win_rate_bayesian*100:>5.1f}% "
-            f"{cat.avg_clv*100:>+7.1f}c "
-            f"${cat.pnl_per_market:>9,.0f} "
-            f"{cat.calibration_score:>7.2f}"
+    # Calibration
+    cal_data = [(b["price"], b["won"]) for b in resolved if b["won"] is not None and b["price"] > 0]
+    calibration = compute_calibration(cal_data)
+
+    # Avg edge
+    avg_edge = avg_clv * 0.7 + (win_rate - 0.5) * 0.3
+
+    # Sharpe
+    sharpe = roi / max(0.01, calibration) if calibration > 0 else 0
+
+    # Kelly
+    kelly = max(0, (win_rate * (1 + avg_clv) - 1) / max(avg_clv, 0.01))
+
+    tier = assign_tier(avg_clv, win_rate, total)
+
+    # Category breakdown
+    by_cat = defaultdict(list)
+    for b in bets:
+        by_cat[b["category"]].append(b)
+
+    cat_scores = {}
+    for cat, cat_bets in by_cat.items():
+        cat_resolved = [b for b in cat_bets if b["resolved"] and b["won"] is not None]
+        cat_wins = sum(1 for b in cat_resolved if b["won"])
+        cat_wr = cat_wins / max(len(cat_resolved), 1) if cat_resolved else 0
+        cat_clvs = [b["clv"] for b in cat_bets if b["clv"] is not None]
+        cat_avg_clv = sum(cat_clvs) / max(len(cat_clvs), 1) if cat_clvs else 0
+        cat_wagered = sum(b["amount_usd"] for b in cat_bets if b["amount_usd"])
+        cat_pnl = sum(
+            (1 - b["price"]) * b["size"] if b["won"] else -b["price"] * b["size"]
+            for b in cat_resolved if b["won"] is not None
         )
+        cat_roi = cat_pnl / max(cat_wagered, 1)
 
-    print("=" * 60)
+        cat_scores[cat] = {
+            "category": cat,
+            "total_bets": len(cat_bets),
+            "win_rate": round(cat_wr, 4),
+            "clv": round(cat_avg_clv, 4),
+            "roi": round(cat_roi, 4),
+        }
 
-# -- Supabase Writer ----------------------------------------------------------
+    # Top markets by position size
+    market_summary = defaultdict(lambda: {"bets": 0, "volume": 0, "title": ""})
+    for b in bets:
+        ms = market_summary[b["market_slug"]]
+        ms["bets"] += 1
+        ms["volume"] += b["amount_usd"]
+        ms["title"] = b["market_title"]
 
-def save_to_supabase(score: WalletScore):
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_KEY")
-    if not url or not key:
-        print("SUPABASE_URL / SUPABASE_SERVICE_KEY not set -- skipping DB save")
-        return
-    if create_client is None:
-        print("supabase package not available -- skipping DB save")
-        return
+    top_markets = sorted(market_summary.items(), key=lambda x: x[1]["volume"], reverse=True)[:10]
 
-    sb = create_client(url, key)
+    # Use position-level PnL if available
+    total_position_pnl = sum(p.get("cashPnl", 0) for p in position_pnl.values())
+    total_position_value = sum(abs(p.get("initialValue", 0)) for p in position_pnl.values())
+    if total_position_value > 0:
+        roi = total_position_pnl / total_position_value
 
-    sb.table("wallet_scores").upsert({
-        "wallet_address":  score.wallet_address,
-        "composite_score": score.composite_score,
-        "tier":            score.tier,
-        "total_markets":   score.total_markets,
-        "total_staked":    score.total_staked,
-        "total_pnl":       score.total_pnl,
-        "account_age_days": score.account_age_days,
-        "computed_at":     score.computed_at,
-    }).execute()
+    # Fetch profile-level aggregate stats (more accurate than trade-level)
+    print("  Fetching profile-level stats...")
+    try:
+        import re as _re
+        page_r = requests.get(f"https://polymarket.com/@{profile.get('username', address)}", timeout=10)
+        if page_r.ok:
+            nd_match = _re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', page_r.text, _re.DOTALL)
+            if nd_match:
+                nd = json.loads(nd_match.group(1))
+                nd_props = nd.get("props", {}).get("pageProps", {}).get("dehydratedState", {}).get("queries", [])
+                for q in nd_props:
+                    qk = q.get("queryKey", [])
+                    qd = q.get("state", {}).get("data")
+                    if "/api/profile/volume" in qk:
+                        total_wagered = float(qd.get("amount", total_wagered) or total_wagered)
+                        profile_pnl = float(qd.get("pnl", 0) or 0)
+                        if total_wagered > 0:
+                            roi = profile_pnl / total_wagered
+                    if "/api/profile/marketsTraded" in qk:
+                        total = int(qd.get("traded", total) or total)
+                    if "user-stats" in qk:
+                        profile_stats = qd
+                        total = int(qd.get("trades", total) or total)
+    except Exception as e:
+        print(f"  Warning: profile stats fetch failed: {e}")
 
-    for cat in score.category_scores.values():
-        if cat.n_markets < 3:
-            continue
-        sb.table("wallet_category_scores").upsert({
-            "wallet_address":     score.wallet_address,
-            "category":           cat.category,
-            "n_markets":          cat.n_markets,
-            "n_wins":             cat.n_wins,
-            "win_rate_bayesian":  cat.win_rate_bayesian,
-            "avg_clv":            cat.avg_clv,
-            "pnl_per_market":     cat.pnl_per_market,
-            "calibration_score":  cat.calibration_score,
-            "total_pnl":          cat.total_pnl,
-        }).execute()
+    # Re-evaluate tier with better data
+    tier = assign_tier(avg_clv, win_rate, total)
+    # Override tier for profitable high-volume traders
+    if roi > 0.02 and total_wagered > 100000:
+        if roi > 0.05:
+            tier = "elite"
+        elif roi > 0.02:
+            tier = "sharp"
 
-    print("Saved to Supabase")
+    # Build report
+    report = {
+        "address": address,
+        "username": profile.get("username") if profile else None,
+        "total_bets": total,
+        "total_volume": round(total_wagered, 2),
+        "resolved_bets": len(resolved),
+        "wins": wins,
+        "win_rate": round(win_rate, 4),
+        "clv": round(avg_clv, 4),
+        "roi": round(roi, 4),
+        "calibration": round(calibration, 4),
+        "avg_edge": round(avg_edge, 4),
+        "sharpe_ratio": round(sharpe, 4),
+        "kelly_fraction": round(kelly, 4),
+        "tier": tier,
+        "categories": cat_scores,
+        "top_markets": top_markets,
+        "open_positions": len(positions),
+        "bets": bets,
+    }
 
-# -- Entry Point --------------------------------------------------------------
+    # Print report
+    print_report(report)
+    return report
 
-async def main():
-    parser = argparse.ArgumentParser(description="SharpWallet -- Wallet Scorer")
-    parser.add_argument("--wallet", required=True, help="Wallet address (0x...)")
-    parser.add_argument("--save-db", action="store_true", help="Save results to Supabase")
-    parser.add_argument("--output-json", help="Save raw score to JSON file")
-    args = parser.parse_args()
 
-    wallet = args.wallet.lower()
+def print_report(r):
+    """Pretty-print the analysis report."""
+    tier_colors = {"elite": "\033[92m", "sharp": "\033[96m", "moderate": "\033[93m", "noise": "\033[90m", "unknown": "\033[90m"}
+    reset = "\033[0m"
+    tc = tier_colors.get(r["tier"], "")
 
-    async with aiohttp.ClientSession() as session:
-        client = PolymarketClient(session)
-        scorer = WalletScorer(client)
+    print(f"\n{'=' * 60}")
+    print(f"  SHARPNESS REPORT")
+    print(f"{'=' * 60}")
+    print(f"  Address:    {r['address']}")
+    if r.get("username"):
+        print(f"  Username:   {r['username']}")
+    print(f"  Tier:       {tc}{r['tier'].upper()}{reset}")
+    print(f"{'─' * 60}")
+    print(f"  Total Bets:      {r['total_bets']}")
+    print(f"  Total Volume:    ${r['total_volume']:,.2f}")
+    print(f"  Resolved Bets:   {r['resolved_bets']}")
+    print(f"  Wins:            {r['wins']}")
+    print(f"{'─' * 60}")
+    clv_sign = "+" if r["clv"] > 0 else ""
+    roi_sign = "+" if r["roi"] > 0 else ""
+    print(f"  Win Rate:        {r['win_rate'] * 100:.1f}%")
+    print(f"  CLV:             {clv_sign}{r['clv'] * 100:.2f}%")
+    print(f"  ROI:             {roi_sign}{r['roi'] * 100:.1f}%")
+    print(f"  Calibration:     {r['calibration']:.4f}")
+    print(f"  Avg Edge:        {r['avg_edge'] * 100:.2f}%")
+    print(f"  Sharpe Ratio:    {r['sharpe_ratio']:.2f}")
+    print(f"  Kelly Fraction:  {r['kelly_fraction']:.4f}")
+    print(f"  Open Positions:  {r['open_positions']}")
 
-        score = await scorer.score_wallet(wallet)
-        print_report(score)
+    if r.get("categories"):
+        print(f"\n{'─' * 60}")
+        print(f"  CATEGORY BREAKDOWN")
+        print(f"  {'Category':<15} {'Bets':>5} {'Win%':>7} {'CLV':>8} {'ROI':>8}")
+        for cat, cs in sorted(r["categories"].items(), key=lambda x: x[1]["clv"], reverse=True):
+            clv_s = f"{'+' if cs['clv'] > 0 else ''}{cs['clv'] * 100:.1f}%"
+            roi_s = f"{'+' if cs['roi'] > 0 else ''}{cs['roi'] * 100:.1f}%"
+            print(f"  {cat:<15} {cs['total_bets']:>5} {cs['win_rate'] * 100:>6.1f}% {clv_s:>8} {roi_s:>8}")
 
-        if args.save_db:
-            save_to_supabase(score)
+    if r.get("top_markets"):
+        print(f"\n{'─' * 60}")
+        print(f"  TOP MARKETS BY VOLUME")
+        for slug, info in r["top_markets"][:5]:
+            title = info["title"][:50]
+            print(f"  ${info['volume']:>10,.2f}  ({info['bets']} bets)  {title}")
 
-        if args.output_json:
-            with open(args.output_json, "w") as f:
-                output = asdict(score)
-                json.dump(output, f, indent=2, default=str)
-            print(f"Score saved to {args.output_json}")
+    print(f"\n{'=' * 60}")
+
+
+def save_to_supabase(report):
+    """Save the analysis results to Supabase."""
+    sb = get_supabase()
+    addr = report["address"]
+    now = datetime.now(timezone.utc).isoformat()
+
+    print("\nSaving to Supabase...")
+
+    # 1. Upsert wallet
+    wallet_row = {
+        "address": addr,
+        "label": report.get("username") or f"{report['tier']}_{addr[:6]}",
+        "total_bets": report["total_bets"],
+        "total_volume": report["total_volume"],
+        "is_tracked": report["tier"] in ("elite", "sharp"),
+        "updated_at": now,
+    }
+    try:
+        sb.table("wallets").upsert(wallet_row, on_conflict="address").execute()
+        print(f"  Wallet saved")
+    except Exception as e:
+        print(f"  Warning: wallet upsert failed: {e}")
+
+    # 2. Upsert wallet_scores
+    score_row = {
+        "address": addr,
+        "total_bets": report["total_bets"],
+        "win_rate": report["win_rate"],
+        "clv": report["clv"],
+        "roi": report["roi"],
+        "calibration": report["calibration"],
+        "avg_edge": report["avg_edge"],
+        "kelly_fraction": report["kelly_fraction"],
+        "sharpe_ratio": report["sharpe_ratio"],
+        "tier": report["tier"],
+        "updated_at": now,
+    }
+    try:
+        sb.table("wallet_scores").upsert(score_row, on_conflict="address").execute()
+        print(f"  Scores saved")
+    except Exception as e:
+        print(f"  Warning: scores upsert failed: {e}")
+
+    # 3. Upsert category scores
+    for cat, cs in report.get("categories", {}).items():
+        cat_row = {
+            "address": addr,
+            "category": cat,
+            "total_bets": cs["total_bets"],
+            "win_rate": cs["win_rate"],
+            "clv": cs["clv"],
+            "roi": cs["roi"],
+            "updated_at": now,
+        }
+        try:
+            sb.table("wallet_category_scores").upsert(cat_row, on_conflict="address,category").execute()
+        except Exception as e:
+            print(f"  Warning: category score upsert ({cat}): {e}")
+    print(f"  Category scores saved ({len(report.get('categories', {}))} categories)")
+
+    # 4. Insert bets (avoid duplicates by checking timestamp)
+    bet_rows = []
+    for b in report.get("bets", [])[:100]:  # cap at 100
+        bet_rows.append({
+            "address": b["address"],
+            "market_slug": b["market_slug"],
+            "market_title": b["market_title"],
+            "category": b["category"],
+            "outcome": b["outcome"] or "Yes",
+            "side": b["side"],
+            "price": b["price"],
+            "size": b["size"],
+            "amount_usd": b["amount_usd"],
+            "timestamp": b["timestamp"],
+            "resolved": b["resolved"],
+            "won": b["won"],
+            "closing_price": b["closing_price"],
+            "clv": b["clv"],
+        })
+
+    if bet_rows:
+        batch_size = 50
+        saved = 0
+        for i in range(0, len(bet_rows), batch_size):
+            batch = bet_rows[i:i + batch_size]
+            try:
+                sb.table("bets").insert(batch).execute()
+                saved += len(batch)
+            except Exception as e:
+                print(f"  Warning: bets batch {i}: {e}")
+        print(f"  Bets saved ({saved}/{len(bet_rows)})")
+
+    print(f"\n  Done! View at dashboard or query Supabase.")
+
+
+# ── CLI entry point ────────────────────────────────────────
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python wallet_analyzer.py <username_or_address> [--save]")
+        print()
+        print("Examples:")
+        print("  python wallet_analyzer.py kch123")
+        print("  python wallet_analyzer.py 0xabc123... --save")
+        print()
+        print("Flags:")
+        print("  --save    Save results to Supabase")
+        sys.exit(1)
+
+    identifier = sys.argv[1]
+    save = "--save" in sys.argv
+
+    # Resolve address
+    print(f"\nResolving '{identifier}'...")
+    address, profile = resolve_address(identifier)
+    print(f"  Address: {address}")
+    if profile.get("username"):
+        print(f"  Username: {profile['username']}")
+
+    # Run analysis
+    report = analyze_wallet(address, profile)
+
+    if report and save:
+        save_to_supabase(report)
+    elif report and not save:
+        print(f"\n  Tip: run with --save to store results in Supabase")
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

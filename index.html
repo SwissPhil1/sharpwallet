@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POLYMARKET SHARP WALLET TERMINAL</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap');
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #0a0e14;
+            --bg2: #0d1117;
+            --bg3: #161b22;
+            --border: #21262d;
+            --green: #00ff88;
+            --green-dim: #00cc6a;
+            --green-bg: rgba(0, 255, 136, 0.06);
+            --red: #ff4757;
+            --amber: #ffb340;
+            --cyan: #00d4ff;
+            --white: #e6edf3;
+            --gray: #7d8590;
+            --gray-dim: #484f58;
+        }
+
+        body {
+            font-family: 'JetBrains Mono', monospace;
+            background: var(--bg);
+            color: var(--white);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* ── Header ── */
+        .header {
+            background: var(--bg2);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header-left { display: flex; align-items: center; gap: 16px; }
+        .logo {
+            color: var(--green);
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 2px;
+        }
+        .status-dot {
+            width: 8px; height: 8px;
+            background: var(--green);
+            border-radius: 50%;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .status-text { color: var(--gray); font-size: 11px; }
+        .header-right { display: flex; gap: 24px; align-items: center; }
+        .stat-box { text-align: right; }
+        .stat-label { color: var(--gray); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+        .stat-value { color: var(--green); font-size: 16px; font-weight: 700; }
+        .stat-value.red { color: var(--red); }
+        .stat-value.amber { color: var(--amber); }
+
+        /* ── Tabs ── */
+        .tab-bar {
+            background: var(--bg2);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            padding: 0 24px;
+        }
+        .tab {
+            padding: 10px 20px;
+            color: var(--gray);
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        .tab:hover { color: var(--white); }
+        .tab.active {
+            color: var(--green);
+            border-bottom-color: var(--green);
+        }
+
+        /* ── Tab content ── */
+        .tab-content { display: none; padding: 16px 24px; }
+        .tab-content.active { display: block; }
+
+        /* ── Wallets tab (split view) ── */
+        .wallets-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            height: calc(100vh - 140px);
+        }
+        .panel {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .panel-header {
+            padding: 10px 16px;
+            background: var(--bg3);
+            border-bottom: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--gray);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .panel-body {
+            flex: 1;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+
+        /* ── Wallet list ── */
+        .wallet-row {
+            display: grid;
+            grid-template-columns: 40px 1fr 70px 70px 70px 60px;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+            align-items: center;
+        }
+        .wallet-row:hover { background: var(--green-bg); }
+        .wallet-row.selected { background: rgba(0, 255, 136, 0.12); border-left: 2px solid var(--green); }
+        .wallet-row .rank { color: var(--gray); }
+        .wallet-row .rank.top3 { color: var(--green); font-weight: 700; }
+        .wallet-row .address { color: var(--cyan); font-size: 11px; }
+        .wallet-row .label { color: var(--gray); font-size: 10px; }
+
+        .metric { text-align: right; }
+        .metric.positive { color: var(--green); }
+        .metric.negative { color: var(--red); }
+        .metric.neutral { color: var(--gray); }
+
+        .tier-badge {
+            font-size: 9px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            text-transform: uppercase;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+        .tier-elite { background: rgba(0, 255, 136, 0.15); color: var(--green); }
+        .tier-sharp { background: rgba(0, 212, 255, 0.15); color: var(--cyan); }
+        .tier-moderate { background: rgba(255, 179, 64, 0.15); color: var(--amber); }
+        .tier-noise { background: rgba(125, 133, 144, 0.15); color: var(--gray); }
+        .tier-unknown { background: rgba(125, 133, 144, 0.1); color: var(--gray-dim); }
+
+        /* ── Detail panel ── */
+        .detail-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        .detail-address { color: var(--cyan); font-size: 14px; margin-bottom: 4px; }
+        .detail-label { color: var(--gray); font-size: 11px; }
+        .detail-metrics {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        .detail-metric {
+            text-align: center;
+            padding: 8px;
+            background: var(--bg3);
+            border-radius: 4px;
+        }
+        .detail-metric .dm-label { font-size: 9px; color: var(--gray); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+        .detail-metric .dm-value { font-size: 18px; font-weight: 700; }
+
+        .category-breakdown { padding: 16px; }
+        .category-breakdown h3 { font-size: 11px; color: var(--gray); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+        .cat-row {
+            display: grid;
+            grid-template-columns: 100px 1fr 70px 70px 70px;
+            padding: 6px 0;
+            font-size: 12px;
+            border-bottom: 1px solid rgba(33, 38, 45, 0.5);
+            align-items: center;
+        }
+        .cat-name { color: var(--amber); text-transform: capitalize; }
+        .cat-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+        .cat-bar-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+
+        /* ── Alerts tab ── */
+        .alert-row {
+            display: grid;
+            grid-template-columns: 140px 100px 1fr 80px 80px 70px 80px;
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            align-items: center;
+        }
+        .alert-row:hover { background: var(--green-bg); }
+        .alert-time { color: var(--gray); font-size: 11px; }
+        .alert-wallet { color: var(--cyan); }
+        .alert-market { color: var(--white); font-size: 11px; }
+        .alert-side.buy { color: var(--green); }
+        .alert-side.sell { color: var(--red); }
+        .arb-flag {
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 3px;
+            background: rgba(255, 179, 64, 0.15);
+            color: var(--amber);
+            font-weight: 700;
+        }
+
+        /* ── Categories tab ── */
+        .categories-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+        }
+        .cat-panel {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .cat-panel-header {
+            padding: 12px 16px;
+            background: var(--bg3);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .cat-panel-title {
+            font-size: 13px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .cat-panel-title.politics { color: var(--cyan); }
+        .cat-panel-title.sports { color: var(--green); }
+        .cat-panel-title.crypto { color: var(--amber); }
+        .cat-panel-title.entertainment { color: var(--red); }
+        .cat-panel-title.science { color: #a78bfa; }
+        .cat-panel-title.other { color: var(--gray); }
+        .cat-wallet-row {
+            display: grid;
+            grid-template-columns: 30px 1fr 60px 60px 50px;
+            padding: 6px 16px;
+            font-size: 11px;
+            border-bottom: 1px solid rgba(33, 38, 45, 0.5);
+            align-items: center;
+        }
+        .cat-wallet-row:hover { background: var(--green-bg); }
+
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+        /* ── Loading ── */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 200px;
+            color: var(--gray);
+            font-size: 12px;
+        }
+        .loading .spinner {
+            width: 16px; height: 16px;
+            border: 2px solid var(--border);
+            border-top-color: var(--green);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 8px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: var(--gray);
+            font-size: 12px;
+        }
+        .empty-state code {
+            display: block;
+            margin-top: 12px;
+            color: var(--green);
+            font-size: 11px;
+        }
+
+        /* ── Column headers ── */
+        .col-header {
+            display: grid;
+            padding: 6px 16px;
+            font-size: 10px;
+            color: var(--gray-dim);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg3);
+        }
+        .wallet-col-header { grid-template-columns: 40px 1fr 70px 70px 70px 60px; }
+        .alert-col-header { grid-template-columns: 140px 100px 1fr 80px 80px 70px 80px; }
+    </style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+    <div class="header-left">
+        <div class="logo">POLYMARKET TERMINAL</div>
+        <div class="status-dot" id="statusDot"></div>
+        <span class="status-text" id="statusText">CONNECTING...</span>
+    </div>
+    <div class="header-right">
+        <div class="stat-box">
+            <div class="stat-label">WALLETS TRACKED</div>
+            <div class="stat-value" id="totalWallets">-</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">ELITE</div>
+            <div class="stat-value" id="eliteCount">-</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">SHARP</div>
+            <div class="stat-value amber" id="sharpCount">-</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">ALERTS TODAY</div>
+            <div class="stat-value" id="alertsToday">-</div>
+        </div>
+    </div>
+</div>
+
+<!-- Tabs -->
+<div class="tab-bar">
+    <div class="tab active" data-tab="wallets">WALLETS</div>
+    <div class="tab" data-tab="alerts">ALERTS</div>
+    <div class="tab" data-tab="categories">CATEGORIES</div>
+</div>
+
+<!-- ═══════════════ WALLETS TAB ═══════════════ -->
+<div class="tab-content active" id="tab-wallets">
+    <div class="wallets-grid">
+        <!-- Left: Ranked list -->
+        <div class="panel">
+            <div class="panel-header">
+                <span>RANKED WALLETS</span>
+                <span id="walletCount">-</span>
+            </div>
+            <div class="col-header wallet-col-header">
+                <span>#</span>
+                <span>ADDRESS</span>
+                <span style="text-align:right">CLV</span>
+                <span style="text-align:right">WIN%</span>
+                <span style="text-align:right">ROI</span>
+                <span style="text-align:right">TIER</span>
+            </div>
+            <div class="panel-body" id="walletList">
+                <div class="loading"><div class="spinner"></div>Loading wallets...</div>
+            </div>
+        </div>
+
+        <!-- Right: Detail -->
+        <div class="panel">
+            <div class="panel-header">
+                <span>WALLET DETAIL</span>
+                <span id="detailTier"></span>
+            </div>
+            <div class="panel-body" id="walletDetail">
+                <div class="empty-state">
+                    Select a wallet from the list
+                    <code>Click any row to view details</code>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ ALERTS TAB ═══════════════ -->
+<div class="tab-content" id="tab-alerts">
+    <div class="panel" style="height: calc(100vh - 140px);">
+        <div class="panel-header">
+            <span>LIVE ALERT FEED</span>
+            <span id="alertCount">-</span>
+        </div>
+        <div class="col-header alert-col-header">
+            <span>TIME</span>
+            <span>WALLET</span>
+            <span>MARKET</span>
+            <span style="text-align:right">SIDE</span>
+            <span style="text-align:right">PRICE</span>
+            <span style="text-align:right">SIZE</span>
+            <span style="text-align:right">ARB GAP</span>
+        </div>
+        <div class="panel-body" id="alertList">
+            <div class="loading"><div class="spinner"></div>Loading alerts...</div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ CATEGORIES TAB ═══════════════ -->
+<div class="tab-content" id="tab-categories">
+    <div class="categories-grid" id="categoriesGrid">
+        <div class="loading"><div class="spinner"></div>Loading categories...</div>
+    </div>
+</div>
+
+<script>
+// ── Supabase config ──
+const SUPABASE_URL = 'https://dbvfxkcxrqlhzvqmfhxd.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRidmZ4a2N4cnFsaHp2cW1maHhkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwNzc3MjcsImV4cCI6MjA4ODY1MzcyN30.EkXpa5BAdzs4ujwYNrIfPq4-qtRKARexIXMYUNrd7Eg';
+
+const headers = {
+    'apikey': SUPABASE_KEY,
+    'Authorization': `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+    'Prefer': 'return=representation'
+};
+
+// ── State ──
+let wallets = [];
+let scores = {};
+let categoryScores = {};
+let alerts = [];
+let selectedWallet = null;
+
+// ── Supabase REST helpers ──
+async function query(table, params = '') {
+    const url = `${SUPABASE_URL}/rest/v1/${table}?${params}`;
+    try {
+        const res = await fetch(url, { headers });
+        if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
+        return await res.json();
+    } catch (err) {
+        console.error(`Query ${table} failed:`, err);
+        return [];
+    }
+}
+
+// ── Data loading ──
+async function loadData() {
+    try {
+        // Parallel fetch
+        const [walletsData, scoresData, catScoresData, alertsData] = await Promise.all([
+            query('wallets', 'select=*&order=created_at.desc&limit=500'),
+            query('wallet_scores', 'select=*&order=rank.asc.nullsfirst&limit=500'),
+            query('wallet_category_scores', 'select=*&order=rank.asc.nullsfirst&limit=2000'),
+            query('alerts', 'select=*&order=timestamp.desc&limit=200'),
+        ]);
+
+        // Index scores by address
+        scores = {};
+        scoresData.forEach(s => { scores[s.address] = s; });
+
+        // Index category scores
+        categoryScores = {};
+        catScoresData.forEach(cs => {
+            if (!categoryScores[cs.address]) categoryScores[cs.address] = [];
+            categoryScores[cs.address].push(cs);
+        });
+
+        // Merge wallet + score data
+        wallets = walletsData.map(w => ({
+            ...w,
+            ...(scores[w.address] || {}),
+        }));
+
+        // Sort by rank if available, otherwise by CLV descending
+        wallets.sort((a, b) => {
+            if (a.rank && b.rank) return a.rank - b.rank;
+            return (parseFloat(b.clv) || 0) - (parseFloat(a.clv) || 0);
+        });
+
+        alerts = alertsData;
+
+        updateStatus(true);
+        renderAll();
+    } catch (err) {
+        console.error('Load failed:', err);
+        updateStatus(false);
+        showEmptyStates();
+    }
+}
+
+function updateStatus(connected) {
+    const dot = document.getElementById('statusDot');
+    const text = document.getElementById('statusText');
+    if (connected && wallets.length > 0) {
+        dot.style.background = 'var(--green)';
+        text.textContent = `LIVE — ${wallets.length} wallets loaded`;
+    } else if (connected) {
+        dot.style.background = 'var(--amber)';
+        text.textContent = 'CONNECTED — no data yet. Run seed_data.py';
+    } else {
+        dot.style.background = 'var(--red)';
+        text.textContent = 'OFFLINE';
+    }
+}
+
+function showEmptyStates() {
+    document.getElementById('walletList').innerHTML = `
+        <div class="empty-state">
+            No wallet data found.<br>
+            Run the pipeline to populate:
+            <code>cd polymarket && python scripts/seed_data.py</code>
+        </div>`;
+    document.getElementById('alertList').innerHTML = `
+        <div class="empty-state">No alerts yet.<code>Alerts appear when the WebSocket monitor detects sharp wallet activity</code></div>`;
+    document.getElementById('categoriesGrid').innerHTML = `
+        <div class="empty-state">No category data.<code>Run seed_data.py first</code></div>`;
+}
+
+// ── Renderers ──
+function renderAll() {
+    renderHeader();
+    renderWalletList();
+    renderAlerts();
+    renderCategories();
+}
+
+function renderHeader() {
+    const elite = wallets.filter(w => w.tier === 'elite').length;
+    const sharp = wallets.filter(w => w.tier === 'sharp').length;
+    document.getElementById('totalWallets').textContent = wallets.length;
+    document.getElementById('eliteCount').textContent = elite;
+    document.getElementById('sharpCount').textContent = sharp;
+    document.getElementById('alertsToday').textContent = alerts.filter(a => {
+        const d = new Date(a.timestamp);
+        const now = new Date();
+        return d.toDateString() === now.toDateString();
+    }).length;
+}
+
+function renderWalletList() {
+    const container = document.getElementById('walletList');
+    document.getElementById('walletCount').textContent = wallets.length;
+
+    if (!wallets.length) {
+        showEmptyStates();
+        return;
+    }
+
+    container.innerHTML = wallets.map((w, i) => {
+        const rank = w.rank || i + 1;
+        const addr = w.address;
+        const shortAddr = w.label || `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+        const clv = (w.clv || 0);
+        const wr = (w.win_rate || 0);
+        const roi = (w.roi || 0);
+        const tier = w.tier || 'unknown';
+
+        return `<div class="wallet-row ${selectedWallet === addr ? 'selected' : ''}" data-addr="${addr}">
+            <span class="rank ${rank <= 3 ? 'top3' : ''}">${rank}</span>
+            <span>
+                <span class="address">${shortAddr}</span>
+                ${w.label ? `<br><span class="label">${addr.slice(0, 10)}...</span>` : ''}
+            </span>
+            <span class="metric ${clv > 0 ? 'positive' : clv < 0 ? 'negative' : 'neutral'}">${clv > 0 ? '+' : ''}${(clv * 100).toFixed(1)}%</span>
+            <span class="metric ${wr > 0.52 ? 'positive' : wr < 0.48 ? 'negative' : 'neutral'}">${(wr * 100).toFixed(1)}%</span>
+            <span class="metric ${roi > 0 ? 'positive' : roi < 0 ? 'negative' : 'neutral'}">${roi > 0 ? '+' : ''}${(roi * 100).toFixed(1)}%</span>
+            <span class="tier-badge tier-${tier}">${tier}</span>
+        </div>`;
+    }).join('');
+
+    container.querySelectorAll('.wallet-row').forEach(row => {
+        row.addEventListener('click', () => selectWallet(row.dataset.addr));
+    });
+}
+
+function selectWallet(addr) {
+    selectedWallet = addr;
+    renderWalletList();
+    renderWalletDetail(addr);
+}
+
+function renderWalletDetail(addr) {
+    const w = wallets.find(w => w.address === addr);
+    if (!w) return;
+
+    const container = document.getElementById('walletDetail');
+    const tier = w.tier || 'unknown';
+    document.getElementById('detailTier').innerHTML = `<span class="tier-badge tier-${tier}">${tier}</span>`;
+
+    const catScores = categoryScores[addr] || [];
+    const clv = w.clv || 0;
+    const wr = w.win_rate || 0;
+    const roi = w.roi || 0;
+    const cal = w.calibration || 0;
+    const sharpe = w.sharpe_ratio || 0;
+    const kelly = w.kelly_fraction || 0;
+
+    container.innerHTML = `
+        <div class="detail-header">
+            <div class="detail-address">${addr}</div>
+            <div class="detail-label">${w.label || 'Unlabeled'} — ${w.total_bets || 0} bets — $${Number(w.total_volume || 0).toLocaleString()} volume</div>
+        </div>
+        <div class="detail-metrics">
+            <div class="detail-metric">
+                <div class="dm-label">CLV</div>
+                <div class="dm-value" style="color: ${clv > 0 ? 'var(--green)' : 'var(--red)'}">${clv > 0 ? '+' : ''}${(clv * 100).toFixed(2)}%</div>
+            </div>
+            <div class="detail-metric">
+                <div class="dm-label">WIN RATE</div>
+                <div class="dm-value" style="color: ${wr > 0.52 ? 'var(--green)' : 'var(--white)'}">${(wr * 100).toFixed(1)}%</div>
+            </div>
+            <div class="detail-metric">
+                <div class="dm-label">ROI</div>
+                <div class="dm-value" style="color: ${roi > 0 ? 'var(--green)' : 'var(--red)'}">${roi > 0 ? '+' : ''}${(roi * 100).toFixed(1)}%</div>
+            </div>
+            <div class="detail-metric">
+                <div class="dm-label">SHARPE</div>
+                <div class="dm-value" style="color: ${sharpe > 1 ? 'var(--green)' : 'var(--white)'}">${sharpe.toFixed(2)}</div>
+            </div>
+        </div>
+        <div class="detail-metrics">
+            <div class="detail-metric">
+                <div class="dm-label">CALIBRATION</div>
+                <div class="dm-value" style="color: ${cal < 0.1 ? 'var(--green)' : 'var(--amber)'}">${cal.toFixed(3)}</div>
+            </div>
+            <div class="detail-metric">
+                <div class="dm-label">AVG EDGE</div>
+                <div class="dm-value" style="color: var(--cyan)">${((w.avg_edge || 0) * 100).toFixed(2)}%</div>
+            </div>
+            <div class="detail-metric">
+                <div class="dm-label">KELLY F</div>
+                <div class="dm-value" style="color: var(--white)">${kelly.toFixed(3)}</div>
+            </div>
+            <div class="detail-metric">
+                <div class="dm-label">RANK</div>
+                <div class="dm-value" style="color: ${(w.rank || 999) <= 3 ? 'var(--green)' : 'var(--white)'}">#${w.rank || '—'}</div>
+            </div>
+        </div>
+        <div class="category-breakdown">
+            <h3>CATEGORY BREAKDOWN</h3>
+            ${catScores.length ? catScores.map(cs => {
+                const barWidth = Math.max(5, Math.min(100, (cs.win_rate || 0) * 100));
+                const barColor = cs.clv > 0.02 ? 'var(--green)' : cs.clv > 0 ? 'var(--cyan)' : 'var(--red)';
+                return `<div class="cat-row">
+                    <span class="cat-name">${cs.category}</span>
+                    <span class="cat-bar"><span class="cat-bar-fill" style="width:${barWidth}%;background:${barColor}"></span></span>
+                    <span class="metric ${cs.clv > 0 ? 'positive' : 'negative'}" style="text-align:right">${cs.clv > 0 ? '+' : ''}${(cs.clv * 100).toFixed(1)}%</span>
+                    <span class="metric" style="text-align:right">${(cs.win_rate * 100).toFixed(1)}%</span>
+                    <span class="metric neutral" style="text-align:right">${cs.total_bets}</span>
+                </div>`;
+            }).join('') : '<div style="color:var(--gray);font-size:12px;padding:8px 0;">No category data</div>'}
+        </div>
+    `;
+}
+
+function renderAlerts() {
+    const container = document.getElementById('alertList');
+    document.getElementById('alertCount').textContent = alerts.length;
+
+    if (!alerts.length) {
+        container.innerHTML = '<div class="empty-state">No alerts yet<code>Alerts appear when the WebSocket monitor detects sharp wallet activity</code></div>';
+        return;
+    }
+
+    container.innerHTML = alerts.map(a => {
+        const time = new Date(a.timestamp).toLocaleString('en-GB', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const shortAddr = a.wallet_label || `${a.address.slice(0, 6)}...${a.address.slice(-4)}`;
+        const hasArb = a.arb_gap && Math.abs(a.arb_gap) > 0.02;
+        return `<div class="alert-row">
+            <span class="alert-time">${time}</span>
+            <span class="alert-wallet">${shortAddr}</span>
+            <span class="alert-market">${(a.market_title || a.market_slug || '').slice(0, 60)}</span>
+            <span class="alert-side ${(a.side || '').toLowerCase()}" style="text-align:right">${a.side} ${a.outcome}</span>
+            <span class="metric" style="text-align:right">${(a.price * 100).toFixed(1)}c</span>
+            <span class="metric neutral" style="text-align:right">$${Number(a.amount_usd || 0).toLocaleString()}</span>
+            <span style="text-align:right">${hasArb ? `<span class="arb-flag">ARB ${(a.arb_gap * 100).toFixed(1)}%</span>` : '—'}</span>
+        </div>`;
+    }).join('');
+}
+
+function renderCategories() {
+    const container = document.getElementById('categoriesGrid');
+    const categories = ['politics', 'sports', 'crypto', 'entertainment', 'science', 'other'];
+
+    // Group wallets by category with their category scores
+    const catData = {};
+    for (const [addr, catList] of Object.entries(categoryScores)) {
+        for (const cs of catList) {
+            if (!catData[cs.category]) catData[cs.category] = [];
+            const w = wallets.find(w => w.address === addr);
+            catData[cs.category].push({ ...cs, label: w?.label, tier: w?.tier });
+        }
+    }
+
+    // Sort each category by CLV
+    for (const cat of Object.keys(catData)) {
+        catData[cat].sort((a, b) => (b.clv || 0) - (a.clv || 0));
+    }
+
+    const activeCats = categories.filter(c => catData[c]?.length > 0);
+    if (!activeCats.length) {
+        container.innerHTML = '<div class="empty-state">No category data.<code>Run seed_data.py first</code></div>';
+        return;
+    }
+
+    container.innerHTML = activeCats.map(cat => {
+        const items = (catData[cat] || []).slice(0, 15);
+        return `<div class="cat-panel">
+            <div class="cat-panel-header">
+                <span class="cat-panel-title ${cat}">${cat}</span>
+                <span style="color:var(--gray);font-size:11px">${(catData[cat] || []).length} wallets</span>
+            </div>
+            <div style="padding:4px 0;">
+                ${items.map((w, i) => {
+                    const shortAddr = w.label || `${w.address.slice(0, 6)}...${w.address.slice(-4)}`;
+                    return `<div class="cat-wallet-row">
+                        <span class="rank ${i < 3 ? 'top3' : ''}">${i + 1}</span>
+                        <span class="address" style="font-size:11px">${shortAddr}</span>
+                        <span class="metric ${w.clv > 0 ? 'positive' : 'negative'}" style="text-align:right">${(w.clv * 100).toFixed(1)}%</span>
+                        <span class="metric" style="text-align:right">${(w.win_rate * 100).toFixed(1)}%</span>
+                        <span class="metric neutral" style="text-align:right">${w.total_bets}</span>
+                    </div>`;
+                }).join('')}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// ── Tab switching ──
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(`tab-${tab.dataset.tab}`).classList.add('active');
+    });
+});
+
+// ── Realtime subscription (Supabase Realtime via WebSocket) ──
+function subscribeToAlerts() {
+    // Poll for new alerts every 10 seconds (simpler than full realtime WS)
+    setInterval(async () => {
+        const newAlerts = await query('alerts', 'select=*&order=timestamp.desc&limit=5');
+        if (newAlerts.length > 0 && alerts.length > 0) {
+            const latestKnown = alerts[0]?.id;
+            const fresh = newAlerts.filter(a => a.id > latestKnown);
+            if (fresh.length > 0) {
+                alerts = [...fresh, ...alerts].slice(0, 200);
+                renderAlerts();
+                renderHeader();
+            }
+        }
+    }, 10000);
+}
+
+// ── Init ──
+loadData();
+subscribeToAlerts();
+// Refresh full data every 60 seconds
+setInterval(loadData, 60000);
+</script>
+</body>
+</html>
