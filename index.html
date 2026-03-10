@@ -774,8 +774,9 @@ function subscribeToAlerts() {
     }, 10000);
 }
 
-// ── Re-score functionality ──
+// ── Re-score functionality (job queue) ──
 let rescoring = false;
+let activeJobId = null;
 
 async function startRescore() {
     if (rescoring) return;
@@ -785,62 +786,95 @@ async function startRescore() {
     btn.disabled = true;
     btn.style.opacity = '0.5';
     status.style.display = 'inline';
+    status.style.color = 'var(--cyan)';
 
     try {
-        // Get list of wallets to score
-        status.textContent = 'Loading wallets...';
-        const resp = await fetch('/api/rescore');
+        // Create a rescore job (Railway processes it in background)
+        status.textContent = 'Creating job...';
+        const resp = await fetch('/api/rescore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
         const data = await resp.json();
-        const walletList = data.wallets || [];
 
-        if (!walletList.length) {
-            status.textContent = 'No wallets found';
+        if (!data.ok) {
+            status.textContent = data.error || 'Failed to create job';
+            status.style.color = 'var(--red)';
             return;
         }
 
-        let scored = 0;
-        let failed = 0;
-        const total = walletList.length;
+        const job = data.job;
+        activeJobId = job.id;
+        status.textContent = `Job #${job.id} queued (${job.total_wallets} wallets)`;
 
-        for (const w of walletList) {
-            status.textContent = `Scoring ${scored + 1}/${total}...`;
-            try {
-                const r = await fetch('/api/rescore', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ address: w.address, label: w.label }),
-                });
-                const result = await r.json();
-                if (result.ok) {
-                    scored++;
-                } else {
-                    failed++;
-                }
-            } catch (e) {
-                failed++;
-            }
-            // Small delay to avoid hammering Polymarket APIs
-            await new Promise(r => setTimeout(r, 300));
+        if (data.message) {
+            status.textContent = data.message;
         }
 
-        status.textContent = `Done! ${scored} scored, ${failed} failed`;
-        status.style.color = 'var(--green)';
-
-        // Reload dashboard data
-        await loadData();
+        // Poll for progress
+        pollJobProgress(job.id);
 
     } catch (e) {
         status.textContent = `Error: ${e.message}`;
         status.style.color = 'var(--red)';
-    } finally {
         rescoring = false;
+        btn.disabled = false;
+        btn.style.opacity = '1';
+    }
+}
+
+async function pollJobProgress(jobId) {
+    const btn = document.getElementById('rescoreBtn');
+    const status = document.getElementById('rescoreStatus');
+
+    const poll = async () => {
+        try {
+            const resp = await fetch(`/api/rescore?id=${jobId}`);
+            const data = await resp.json();
+            const job = data.job;
+
+            if (!job) {
+                status.textContent = 'Job not found';
+                status.style.color = 'var(--red)';
+                cleanup();
+                return;
+            }
+
+            if (job.status === 'pending') {
+                status.textContent = `Job #${jobId} pending...`;
+                setTimeout(poll, 3000);
+            } else if (job.status === 'running') {
+                const pct = job.total_wallets > 0 ? Math.round((job.scored + job.failed) / job.total_wallets * 100) : 0;
+                status.textContent = `Scoring... ${job.scored}/${job.total_wallets} (${pct}%)`;
+                setTimeout(poll, 3000);
+            } else if (job.status === 'completed') {
+                status.textContent = `Done! ${job.scored} scored, ${job.failed} failed`;
+                status.style.color = 'var(--green)';
+                await loadData();
+                cleanup();
+            } else if (job.status === 'failed') {
+                status.textContent = `Failed: ${job.error || 'unknown error'}`;
+                status.style.color = 'var(--red)';
+                cleanup();
+            }
+        } catch (e) {
+            status.textContent = `Poll error: ${e.message}`;
+            setTimeout(poll, 5000);
+        }
+    };
+
+    function cleanup() {
+        rescoring = false;
+        activeJobId = null;
         btn.disabled = false;
         btn.style.opacity = '1';
         setTimeout(() => {
             status.style.display = 'none';
             status.style.color = 'var(--cyan)';
-        }, 5000);
+        }, 8000);
     }
+
+    poll();
 }
 
 // ── Init ──
