@@ -1,9 +1,11 @@
 {
   "version": 2,
   "builds": [
-    { "src": "index.html", "use": "@vercel/static" }
+    { "src": "index.html", "use": "@vercel/static" },
+    { "src": "api/rescore.py", "use": "@vercel/python" }
   ],
   "routes": [
+    { "src": "/api/rescore", "dest": "/api/rescore.py" },
     { "src": "/(.*)", "dest": "/index.html" }
   ]
 }

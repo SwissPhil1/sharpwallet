@@ -132,7 +132,7 @@
         /* ── Wallet list ── */
         .wallet-row {
             display: grid;
-            grid-template-columns: 40px 1fr 70px 70px 70px 60px;
+            grid-template-columns: 40px 1fr 70px 70px 70px 70px 60px;
             padding: 8px 16px;
             border-bottom: 1px solid var(--border);
             font-size: 12px;
@@ -171,23 +171,8 @@
             padding: 16px;
             border-bottom: 1px solid var(--border);
         }
-        .detail-address { color: var(--cyan); font-size: 14px; margin-bottom: 4px; word-break: break-all; }
-        .detail-address a { color: var(--cyan); text-decoration: none; }
-        .detail-address a:hover { text-decoration: underline; }
+        .detail-address { color: var(--cyan); font-size: 14px; margin-bottom: 4px; }
         .detail-label { color: var(--gray); font-size: 11px; }
-        .poly-link {
-            display: inline-block;
-            color: var(--cyan);
-            font-size: 10px;
-            padding: 2px 8px;
-            border: 1px solid var(--cyan);
-            border-radius: 3px;
-            text-decoration: none;
-            margin-left: 8px;
-            opacity: 0.7;
-            transition: opacity 0.15s;
-        }
-        .poly-link:hover { opacity: 1; }
         .detail-metrics {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -332,7 +317,7 @@
             border-bottom: 1px solid var(--border);
             background: var(--bg3);
         }
-        .wallet-col-header { grid-template-columns: 40px 1fr 70px 70px 70px 60px; }
+        .wallet-col-header { grid-template-columns: 40px 1fr 70px 70px 70px 70px 60px; }
         .alert-col-header { grid-template-columns: 140px 100px 1fr 80px 80px 70px 80px; }
     </style>
 </head>
@@ -379,7 +364,11 @@
         <div class="panel">
             <div class="panel-header">
                 <span>RANKED WALLETS</span>
-                <span id="walletCount">-</span>
+                <span style="display:flex;align-items:center;gap:10px">
+                    <button id="rescoreBtn" onclick="startRescore()" style="background:var(--cyan);color:var(--bg1);border:none;padding:3px 10px;border-radius:3px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:1px">RE-SCORE</button>
+                    <span id="rescoreStatus" style="font-size:11px;color:var(--cyan);display:none"></span>
+                    <span id="walletCount">-</span>
+                </span>
             </div>
             <div class="col-header wallet-col-header">
                 <span>#</span>
@@ -387,6 +376,7 @@
                 <span style="text-align:right">CLV</span>
                 <span style="text-align:right">WIN%</span>
                 <span style="text-align:right">ROI</span>
+                <span style="text-align:right">CUR ROI</span>
                 <span style="text-align:right">TIER</span>
             </div>
             <div class="panel-body" id="walletList">
@@ -577,25 +567,23 @@ function renderWalletList() {
     container.innerHTML = wallets.map((w, i) => {
         const rank = w.rank || i + 1;
         const addr = w.address;
-        const label = w.label || '';
-        // Show real name if label doesn't look like an auto-generated tier_prefix
-        const isTierLabel = /^(elite|sharp|moderate|noise|unknown)_/.test(label);
-        const displayName = (!isTierLabel && label) ? label : `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-        const subLabel = (!isTierLabel && label) ? `${addr.slice(0, 10)}...` : '';
+        const shortAddr = w.label || `${addr.slice(0, 6)}...${addr.slice(-4)}`;
         const clv = (w.clv || 0);
         const wr = (w.win_rate || 0);
         const roi = (w.roi || 0);
+        const currentRoi = (w.current_roi || roi);
         const tier = w.tier || 'unknown';
 
         return `<div class="wallet-row ${selectedWallet === addr ? 'selected' : ''}" data-addr="${addr}">
             <span class="rank ${rank <= 3 ? 'top3' : ''}">${rank}</span>
             <span>
-                <span class="address">${displayName}</span>
-                ${subLabel ? `<br><span class="label">${subLabel}</span>` : `<br><span class="label">${addr.slice(0, 10)}...</span>`}
+                <span class="address">${shortAddr}</span>
+                ${w.label ? `<br><span class="label">${addr.slice(0, 10)}...</span>` : ''}
             </span>
             <span class="metric ${clv > 0 ? 'positive' : clv < 0 ? 'negative' : 'neutral'}">${clv > 0 ? '+' : ''}${(clv * 100).toFixed(1)}%</span>
             <span class="metric ${wr > 0.52 ? 'positive' : wr < 0.48 ? 'negative' : 'neutral'}">${(wr * 100).toFixed(1)}%</span>
             <span class="metric ${roi > 0 ? 'positive' : roi < 0 ? 'negative' : 'neutral'}">${roi > 0 ? '+' : ''}${(roi * 100).toFixed(1)}%</span>
+            <span class="metric ${currentRoi > 0 ? 'positive' : currentRoi < 0 ? 'negative' : 'neutral'}">${currentRoi > 0 ? '+' : ''}${(currentRoi * 100).toFixed(1)}%</span>
             <span class="tier-badge tier-${tier}">${tier}</span>
         </div>`;
     }).join('');
@@ -623,22 +611,15 @@ function renderWalletDetail(addr) {
     const clv = w.clv || 0;
     const wr = w.win_rate || 0;
     const roi = w.roi || 0;
-    const cal = w.calibration;
-    const sharpe = w.sharpe_ratio;
-    const kelly = w.kelly_fraction;
-
-    const label = w.label || '';
-    const isTierLabel = /^(elite|sharp|moderate|noise|unknown)_/.test(label);
-    const displayName = (!isTierLabel && label) ? label : null;
-    const polyUrl = `https://polymarket.com/profile/${addr}`;
+    const currentRoi = w.current_roi || roi;
+    const cal = w.calibration || 0;
+    const sharpe = w.sharpe_ratio || 0;
+    const kelly = w.kelly_fraction || 0;
 
     container.innerHTML = `
         <div class="detail-header">
-            <div class="detail-address">
-                <a href="${polyUrl}" target="_blank" rel="noopener">${addr}</a>
-                <a href="${polyUrl}" target="_blank" rel="noopener" class="poly-link">View on Polymarket</a>
-            </div>
-            <div class="detail-label">${displayName || addr.slice(0, 10) + '...'} — ${w.scored_bets ? `scored on ${w.scored_bets} of ` : ''}${w.total_bets || 0} bets — $${Number(w.total_volume || 0).toLocaleString()} volume</div>
+            <div class="detail-address">${addr}</div>
+            <div class="detail-label">${w.label || 'Unlabeled'} — ${w.total_bets || 0} bets — $${Number(w.total_volume || 0).toLocaleString()} volume</div>
         </div>
         <div class="detail-metrics">
             <div class="detail-metric">
@@ -654,14 +635,14 @@ function renderWalletDetail(addr) {
                 <div class="dm-value" style="color: ${roi > 0 ? 'var(--green)' : 'var(--red)'}">${roi > 0 ? '+' : ''}${(roi * 100).toFixed(1)}%</div>
             </div>
             <div class="detail-metric">
-                <div class="dm-label">CONSISTENCY</div>
-                <div class="dm-value" style="color: ${sharpe != null && sharpe > 1 ? 'var(--green)' : 'var(--white)'}">${sharpe != null ? sharpe.toFixed(2) : 'N/A'}</div>
+                <div class="dm-label">CURRENT ROI</div>
+                <div class="dm-value" style="color: ${currentRoi > 0 ? 'var(--green)' : 'var(--red)'}">${currentRoi > 0 ? '+' : ''}${(currentRoi * 100).toFixed(1)}%</div>
             </div>
         </div>
         <div class="detail-metrics">
             <div class="detail-metric">
                 <div class="dm-label">CALIBRATION</div>
-                <div class="dm-value" style="color: ${cal != null && cal < 0.1 ? 'var(--green)' : 'var(--amber)'}">${cal != null ? cal.toFixed(3) : 'N/A'}</div>
+                <div class="dm-value" style="color: ${cal < 0.1 ? 'var(--green)' : 'var(--amber)'}">${cal.toFixed(3)}</div>
             </div>
             <div class="detail-metric">
                 <div class="dm-label">AVG EDGE</div>
@@ -669,11 +650,11 @@ function renderWalletDetail(addr) {
             </div>
             <div class="detail-metric">
                 <div class="dm-label">KELLY F</div>
-                <div class="dm-value" style="color: var(--white)">${kelly != null ? kelly.toFixed(3) : 'N/A'}</div>
+                <div class="dm-value" style="color: var(--white)">${kelly.toFixed(3)}</div>
             </div>
             <div class="detail-metric">
-                <div class="dm-label">RANK</div>
-                <div class="dm-value" style="color: ${(w.rank || 999) <= 3 ? 'var(--green)' : 'var(--white)'}">#${w.rank || '—'}</div>
+                <div class="dm-label">SHARPE</div>
+                <div class="dm-value" style="color: ${sharpe > 1 ? 'var(--green)' : 'var(--white)'}">${sharpe.toFixed(2)}</div>
             </div>
         </div>
         <div class="category-breakdown">
@@ -791,6 +772,75 @@ function subscribeToAlerts() {
             }
         }
     }, 10000);
+}
+
+// ── Re-score functionality ──
+let rescoring = false;
+
+async function startRescore() {
+    if (rescoring) return;
+    rescoring = true;
+    const btn = document.getElementById('rescoreBtn');
+    const status = document.getElementById('rescoreStatus');
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    status.style.display = 'inline';
+
+    try {
+        // Get list of wallets to score
+        status.textContent = 'Loading wallets...';
+        const resp = await fetch('/api/rescore');
+        const data = await resp.json();
+        const walletList = data.wallets || [];
+
+        if (!walletList.length) {
+            status.textContent = 'No wallets found';
+            return;
+        }
+
+        let scored = 0;
+        let failed = 0;
+        const total = walletList.length;
+
+        for (const w of walletList) {
+            status.textContent = `Scoring ${scored + 1}/${total}...`;
+            try {
+                const r = await fetch('/api/rescore', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ address: w.address, label: w.label }),
+                });
+                const result = await r.json();
+                if (result.ok) {
+                    scored++;
+                } else {
+                    failed++;
+                }
+            } catch (e) {
+                failed++;
+            }
+            // Small delay to avoid hammering Polymarket APIs
+            await new Promise(r => setTimeout(r, 300));
+        }
+
+        status.textContent = `Done! ${scored} scored, ${failed} failed`;
+        status.style.color = 'var(--green)';
+
+        // Reload dashboard data
+        await loadData();
+
+    } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = 'var(--red)';
+    } finally {
+        rescoring = false;
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        setTimeout(() => {
+            status.style.display = 'none';
+            status.style.color = 'var(--cyan)';
+        }, 5000);
+    }
 }
 
 // ── Init ──
