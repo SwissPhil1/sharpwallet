@@ -321,18 +321,37 @@ signal.signal(signal.SIGTERM, handle_signal)
 
 
 def main():
-    mode = sys.argv[1] if len(sys.argv) > 1 else "poll"
+    mode = sys.argv[1] if len(sys.argv) > 1 else "ws"
 
     if mode == "ws":
         print("Starting WebSocket monitor...")
         asyncio.run(monitor_trades())
     elif mode == "poll":
-        print("Starting REST poller (use 'ws' argument for WebSocket mode)...")
+        print("Starting REST poller...")
         asyncio.run(poll_trades())
+    elif mode == "test":
+        print("Sending test Telegram alert...")
+        if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+            print("ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set")
+            return
+        test_alert = {
+            "address": "0x0000000000000000000000000000000000000000",
+            "wallet_label": "TEST_WALLET",
+            "wallet_tier": "elite",
+            "market_title": "SharpWallet end-to-end test alert",
+            "side": "BUY",
+            "outcome": "Yes",
+            "price": 0.65,
+            "amount_usd": 100,
+            "category": "test",
+        }
+        send_telegram(test_alert)
+        print("Test alert sent — check Telegram @The_Sharpest_bot")
     else:
-        print(f"Usage: python ws_monitor.py [ws|poll]")
-        print(f"  ws   — WebSocket live feed (requires market subscriptions)")
-        print(f"  poll — REST API polling every 30s (default, more reliable)")
+        print(f"Usage: python ws_monitor.py [ws|poll|test]")
+        print(f"  ws   — WebSocket live feed (default)")
+        print(f"  poll — REST API polling every 30s")
+        print(f"  test — Send a test Telegram alert")
 
 
 if __name__ == "__main__":

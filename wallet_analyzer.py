@@ -103,7 +103,7 @@ def resolve_address(identifier):
 DATA_API = "https://data-api.polymarket.com"
 
 
-def fetch_user_trades(address, limit=2000):
+def fetch_user_trades(address, limit=10000):
     """Fetch trades from Polymarket data API with pagination."""
     all_trades = []
     cursor = None
@@ -307,10 +307,13 @@ def compute_clv(entry_price, closing_price, side):
     return float(entry_price - closing_price)
 
 
+MIN_CALIBRATION_BETS = 20
+
+
 def compute_calibration(bets_with_prices):
-    """Calibration score (lower = better)."""
-    if not bets_with_prices:
-        return 0.5
+    """Calibration score (lower = better). Returns None if insufficient data."""
+    if not bets_with_prices or len(bets_with_prices) < MIN_CALIBRATION_BETS:
+        return None
     buckets = defaultdict(list)
     for price, won in bets_with_prices:
         bucket = min(9, int(price * 10))
@@ -322,7 +325,7 @@ def compute_calibration(bets_with_prices):
         actual = sum(outcomes) / len(outcomes)
         total_error += abs(actual - implied)
         count += 1
-    return round(total_error / max(count, 1), 4) if count else 0.5
+    return round(total_error / max(count, 1), 4) if count else None
 
 
 def assign_tier(clv, win_rate, total_bets):
@@ -412,6 +415,13 @@ def analyze_wallet(address, profile=None):
         if pos and pos.get("percentPnl", 0) != 0:
             won = pos["cashPnl"] > 0
 
+        # Impute closing_price for resolved bets (binary markets: 0 or 1)
+        if closing_price is None and won is not None:
+            if side == "BUY":
+                closing_price = 1.0 if won else 0.0
+            else:
+                closing_price = 0.0 if won else 1.0
+
         amount_usd = round(price * size, 2)
 
         bets.append({
@@ -428,7 +438,7 @@ def analyze_wallet(address, profile=None):
             "resolved": closing_price is not None and closing_price in (0, 1),
             "won": won,
             "closing_price": closing_price,
-            "clv": compute_clv(price, closing_price, side) if closing_price else None,
+            "clv": compute_clv(price, closing_price, side) if closing_price is not None else None,
         })
 
     # Compute metrics
@@ -458,11 +468,13 @@ def analyze_wallet(address, profile=None):
     # Avg edge
     avg_edge = avg_clv * 0.7 + (win_rate - 0.5) * 0.3
 
-    # Sharpe
-    sharpe = roi / max(0.01, calibration) if calibration > 0 else 0
-
-    # Kelly
-    kelly = max(0, (win_rate * (1 + avg_clv) - 1) / max(avg_clv, 0.01))
+    # Sharpe (edge consistency) and Kelly — require sufficient calibration data
+    if calibration is not None:
+        sharpe = roi / max(0.01, calibration) if calibration > 0 else 0
+        kelly = max(0, (win_rate * (1 + avg_clv) - 1) / max(avg_clv, 0.01))
+    else:
+        sharpe = None
+        kelly = None
 
     tier = assign_tier(avg_clv, win_rate, total)
 
@@ -509,33 +521,7 @@ def analyze_wallet(address, profile=None):
     if total_position_value > 0:
         roi = total_position_pnl / total_position_value
 
-    # Fetch profile-level aggregate stats (more accurate than trade-level)
-    print("  Fetching profile-level stats...")
-    try:
-        import re as _re
-        page_r = requests.get(f"https://polymarket.com/@{profile.get('username', address)}", timeout=10)
-        if page_r.ok:
-            nd_match = _re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', page_r.text, _re.DOTALL)
-            if nd_match:
-                nd = json.loads(nd_match.group(1))
-                nd_props = nd.get("props", {}).get("pageProps", {}).get("dehydratedState", {}).get("queries", [])
-                for q in nd_props:
-                    qk = q.get("queryKey", [])
-                    qd = q.get("state", {}).get("data")
-                    if "/api/profile/volume" in qk:
-                        total_wagered = float(qd.get("amount", total_wagered) or total_wagered)
-                        profile_pnl = float(qd.get("pnl", 0) or 0)
-                        if total_wagered > 0:
-                            roi = profile_pnl / total_wagered
-                    if "/api/profile/marketsTraded" in qk:
-                        total = int(qd.get("traded", total) or total)
-                    if "user-stats" in qk:
-                        profile_stats = qd
-                        total = int(qd.get("trades", total) or total)
-    except Exception as e:
-        print(f"  Warning: profile stats fetch failed: {e}")
-
-    # Re-evaluate tier with better data
+    # Evaluate tier
     tier = assign_tier(avg_clv, win_rate, total)
     # Override tier for profitable high-volume traders
     if roi > 0.02 and total_wagered > 100000:
@@ -570,10 +556,10 @@ def analyze_wallet(address, profile=None):
         "win_rate": round(win_rate, 4),
         "clv": round(avg_clv, 4),
         "roi": round(roi, 4),
-        "calibration": round(calibration, 4),
+        "calibration": round(calibration, 4) if calibration is not None else None,
         "avg_edge": round(avg_edge, 4),
-        "sharpe_ratio": round(sharpe, 4),
-        "kelly_fraction": round(kelly, 4),
+        "sharpe_ratio": round(sharpe, 4) if sharpe is not None else None,
+        "kelly_fraction": round(kelly, 4) if kelly is not None else None,
         "tier": tier,
         "categories": cat_scores,
         "top_markets": top_markets,
@@ -610,10 +596,10 @@ def print_report(r):
     print(f"  Win Rate:        {r['win_rate'] * 100:.1f}%")
     print(f"  CLV:             {clv_sign}{r['clv'] * 100:.2f}%")
     print(f"  ROI:             {roi_sign}{r['roi'] * 100:.1f}%")
-    print(f"  Calibration:     {r['calibration']:.4f}")
+    print(f"  Calibration:     {r['calibration']:.4f}" if r['calibration'] is not None else "  Calibration:     N/A (< 20 resolved bets)")
     print(f"  Avg Edge:        {r['avg_edge'] * 100:.2f}%")
-    print(f"  Sharpe Ratio:    {r['sharpe_ratio']:.2f}")
-    print(f"  Kelly Fraction:  {r['kelly_fraction']:.4f}")
+    print(f"  Consistency:     {r['sharpe_ratio']:.2f}" if r['sharpe_ratio'] is not None else "  Consistency:     N/A")
+    print(f"  Kelly Fraction:  {r['kelly_fraction']:.4f}" if r['kelly_fraction'] is not None else "  Kelly Fraction:  N/A")
     print(f"  Open Positions:  {r['open_positions']}")
 
     if r.get("categories"):
@@ -659,9 +645,11 @@ def save_to_supabase(report):
         print(f"  Warning: wallet upsert failed: {e}")
 
     # 2. Upsert wallet_scores
+    scored_bets = len([b for b in report.get("bets", []) if b.get("clv") is not None])
     score_row = {
         "address": addr,
         "total_bets": report["total_bets"],
+        "scored_bets": scored_bets,
         "win_rate": report["win_rate"],
         "clv": report["clv"],
         "roi": report["roi"],
@@ -674,9 +662,15 @@ def save_to_supabase(report):
     }
     try:
         sb.table("wallet_scores").upsert(score_row, on_conflict="address").execute()
-        print(f"  Scores saved")
+        print(f"  Scores saved (scored {scored_bets} bets with CLV)")
     except Exception as e:
-        print(f"  Warning: scores upsert failed: {e}")
+        # Retry without scored_bets if column doesn't exist yet
+        if "scored_bets" in str(e):
+            del score_row["scored_bets"]
+            sb.table("wallet_scores").upsert(score_row, on_conflict="address").execute()
+            print(f"  Scores saved (scored_bets column pending)")
+        else:
+            print(f"  Warning: scores upsert failed: {e}")
 
     # 3. Upsert category scores
     for cat, cs in report.get("categories", {}).items():
@@ -697,7 +691,7 @@ def save_to_supabase(report):
 
     # 4. Insert bets (avoid duplicates by checking timestamp)
     bet_rows = []
-    for b in report.get("bets", [])[:100]:  # cap at 100
+    for b in report.get("bets", [])[:500]:  # cap at 500
         bet_rows.append({
             "address": b["address"],
             "market_slug": b["market_slug"],

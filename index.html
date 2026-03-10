@@ -623,9 +623,9 @@ function renderWalletDetail(addr) {
     const clv = w.clv || 0;
     const wr = w.win_rate || 0;
     const roi = w.roi || 0;
-    const cal = w.calibration || 0;
-    const sharpe = w.sharpe_ratio || 0;
-    const kelly = w.kelly_fraction || 0;
+    const cal = w.calibration;
+    const sharpe = w.sharpe_ratio;
+    const kelly = w.kelly_fraction;
 
     const label = w.label || '';
     const isTierLabel = /^(elite|sharp|moderate|noise|unknown)_/.test(label);
@@ -638,7 +638,7 @@ function renderWalletDetail(addr) {
                 <a href="${polyUrl}" target="_blank" rel="noopener">${addr}</a>
                 <a href="${polyUrl}" target="_blank" rel="noopener" class="poly-link">View on Polymarket</a>
             </div>
-            <div class="detail-label">${displayName || addr.slice(0, 10) + '...'} — ${w.total_bets || 0} bets — $${Number(w.total_volume || 0).toLocaleString()} volume</div>
+            <div class="detail-label">${displayName || addr.slice(0, 10) + '...'} — ${w.scored_bets ? `scored on ${w.scored_bets} of ` : ''}${w.total_bets || 0} bets — $${Number(w.total_volume || 0).toLocaleString()} volume</div>
         </div>
         <div class="detail-metrics">
             <div class="detail-metric">
@@ -654,14 +654,14 @@ function renderWalletDetail(addr) {
                 <div class="dm-value" style="color: ${roi > 0 ? 'var(--green)' : 'var(--red)'}">${roi > 0 ? '+' : ''}${(roi * 100).toFixed(1)}%</div>
             </div>
             <div class="detail-metric">
-                <div class="dm-label">SHARPE</div>
-                <div class="dm-value" style="color: ${sharpe > 1 ? 'var(--green)' : 'var(--white)'}">${sharpe.toFixed(2)}</div>
+                <div class="dm-label">CONSISTENCY</div>
+                <div class="dm-value" style="color: ${sharpe != null && sharpe > 1 ? 'var(--green)' : 'var(--white)'}">${sharpe != null ? sharpe.toFixed(2) : 'N/A'}</div>
             </div>
         </div>
         <div class="detail-metrics">
             <div class="detail-metric">
                 <div class="dm-label">CALIBRATION</div>
-                <div class="dm-value" style="color: ${cal < 0.1 ? 'var(--green)' : 'var(--amber)'}">${cal.toFixed(3)}</div>
+                <div class="dm-value" style="color: ${cal != null && cal < 0.1 ? 'var(--green)' : 'var(--amber)'}">${cal != null ? cal.toFixed(3) : 'N/A'}</div>
             </div>
             <div class="detail-metric">
                 <div class="dm-label">AVG EDGE</div>
@@ -669,7 +669,7 @@ function renderWalletDetail(addr) {
             </div>
             <div class="detail-metric">
                 <div class="dm-label">KELLY F</div>
-                <div class="dm-value" style="color: var(--white)">${kelly.toFixed(3)}</div>
+                <div class="dm-value" style="color: var(--white)">${kelly != null ? kelly.toFixed(3) : 'N/A'}</div>
             </div>
             <div class="detail-metric">
                 <div class="dm-label">RANK</div>

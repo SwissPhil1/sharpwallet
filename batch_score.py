@@ -92,7 +92,7 @@ def discover_active_traders(min_trades=5, pages=8):
 
 def quick_score(address):
     """Score a wallet — lighter version of analyze_wallet for batch use."""
-    trades = fetch_user_trades(address, limit=500)
+    trades = fetch_user_trades(address, limit=2000)
     if not trades or len(trades) < 3:
         return None
 
@@ -123,7 +123,14 @@ def quick_score(address):
         if pos and pos.get("percentPnl", 0) != 0:
             won = pos["cashPnl"] > 0
 
-        clv = compute_clv(price, closing_price, side) if closing_price else None
+        # Impute closing_price for resolved bets (binary markets: 0 or 1)
+        if closing_price is None and won is not None:
+            if side == "BUY":
+                closing_price = 1.0 if won else 0.0
+            else:
+                closing_price = 0.0 if won else 1.0
+
+        clv = compute_clv(price, closing_price, side) if closing_price is not None else None
         amount_usd = round(price * size, 2)
 
         bet = {
@@ -166,8 +173,12 @@ def quick_score(address):
     cal_data = [(b["price"], b["won"]) for b in resolved if b["won"] is not None and b["price"] > 0]
     calibration = compute_calibration(cal_data)
     avg_edge = avg_clv * 0.7 + (win_rate - 0.5) * 0.3
-    sharpe = roi / max(0.01, calibration) if calibration > 0 else 0
-    kelly = max(0, (win_rate * (1 + avg_clv) - 1) / max(avg_clv, 0.01))
+    if calibration is not None:
+        sharpe = roi / max(0.01, calibration) if calibration > 0 else 0
+        kelly = max(0, (win_rate * (1 + avg_clv) - 1) / max(avg_clv, 0.01))
+    else:
+        sharpe = None
+        kelly = None
     tier = assign_tier(avg_clv, win_rate, len(bets))
 
     if roi > 0.05 and total_wagered > 100000:
@@ -208,10 +219,10 @@ def quick_score(address):
         "win_rate": round(win_rate, 4),
         "clv": round(avg_clv, 4),
         "roi": round(roi, 4),
-        "calibration": round(calibration, 4),
+        "calibration": round(calibration, 4) if calibration is not None else None,
         "avg_edge": round(avg_edge, 4),
-        "sharpe_ratio": round(sharpe, 4),
-        "kelly_fraction": round(kelly, 4),
+        "sharpe_ratio": round(sharpe, 4) if sharpe is not None else None,
+        "kelly_fraction": round(kelly, 4) if kelly is not None else None,
         "tier": tier,
         "categories": cat_scores,
         "top_markets": [],

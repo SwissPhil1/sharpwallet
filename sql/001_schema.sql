@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS wallets (
 CREATE TABLE IF NOT EXISTS wallet_scores (
     address         TEXT PRIMARY KEY REFERENCES wallets(address) ON DELETE CASCADE,
     total_bets      INTEGER DEFAULT 0,
+    scored_bets     INTEGER DEFAULT 0,              -- how many bets had CLV computed
     win_rate        NUMERIC(5,4) DEFAULT 0,        -- 0.0000 to 1.0000
     clv             NUMERIC(8,4) DEFAULT 0,        -- Closing Line Value (positive = sharp)
     roi             NUMERIC(8,4) DEFAULT 0,        -- Return on investment
