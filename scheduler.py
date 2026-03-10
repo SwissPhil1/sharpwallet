@@ -23,11 +23,20 @@ sys.path.insert(0, str(Path(__file__).parent))
 RESCORE_INTERVAL_HOURS = int(os.environ.get("RESCORE_INTERVAL_HOURS", "4"))
 JOB_POLL_INTERVAL = int(os.environ.get("JOB_POLL_INTERVAL", "30"))
 
+# Normalize env vars — accept common aliases
+if not os.environ.get("SUPABASE_SERVICE_KEY"):
+    for alt in ["SUPABASE_KEY", "SUPABASE_ANON_KEY"]:
+        if os.environ.get(alt):
+            os.environ["SUPABASE_SERVICE_KEY"] = os.environ[alt]
+            break
+
 # Verify required env vars
 required = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY"]
 missing = [k for k in required if not os.environ.get(k)]
 if missing:
     print(f"ERROR: Missing environment variables: {', '.join(missing)}")
+    print("Set these in Railway dashboard: Settings > Variables")
+    print("Available env vars: " + ", ".join(sorted(k for k in os.environ if "SUPA" in k.upper() or "POLY" in k.upper())))
     sys.exit(1)
 
 running = True
