@@ -20,6 +20,9 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
+sys.path.insert(0, str(Path(__file__).parent))
+from scoring import categorize_market
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ["SUPABASE_ANON_KEY"]
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -44,7 +47,6 @@ def load_tracked_wallets():
         result = supabase.table("wallets").select("address,label").eq("is_tracked", True).execute()
         tracked_wallets = {w["address"]: w for w in result.data}
 
-        # Also load their scores
         if tracked_wallets:
             scores = supabase.table("wallet_scores").select("address,tier,clv,win_rate,rank").execute()
             for s in scores.data:
@@ -90,18 +92,6 @@ def get_market_info(condition_id):
     return {"slug": condition_id, "title": condition_id, "category": "other"}
 
 
-def categorize_market(title):
-    """Quick market categorization."""
-    t = (title or "").lower()
-    if any(w in t for w in ["trump", "biden", "election", "congress", "president", "democrat", "republican"]):
-        return "politics"
-    if any(w in t for w in ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana"]):
-        return "crypto"
-    if any(w in t for w in ["nfl", "nba", "mlb", "soccer", "football", "ufc", "sports"]):
-        return "sports"
-    return "other"
-
-
 def create_alert(wallet, trade, market_info):
     """Insert an alert into Supabase."""
     try:
@@ -121,16 +111,11 @@ def create_alert(wallet, trade, market_info):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        # Check for arb gap (placeholder — would need Pinnacle API)
-        # alert["pinnacle_price"] = ...
-        # alert["arb_gap"] = ...
-
         supabase.table("alerts").insert(alert).execute()
         print(f"  ALERT: {wallet.get('label', wallet['address'][:10])} | "
               f"{trade.get('side')} {trade.get('outcome')} @ {trade.get('price')} | "
               f"{market_info.get('title', '')[:50]}")
 
-        # Send Telegram if configured
         if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
             send_telegram(alert)
 
@@ -142,7 +127,7 @@ def create_alert(wallet, trade, market_info):
 
 def send_telegram(alert):
     """Send alert to Telegram."""
-    tier_emoji = {"elite": "🟢", "sharp": "🔵", "moderate": "🟡"}.get(alert["wallet_tier"], "⚪")
+    tier_emoji = {"elite": "\U0001f7e2", "sharp": "\U0001f535", "moderate": "\U0001f7e1"}.get(alert["wallet_tier"], "\u26aa")
     msg = (
         f"{tier_emoji} <b>{alert['wallet_tier'].upper()} WALLET</b>\n"
         f"<code>{alert['wallet_label'] or alert['address'][:12]}</code>\n\n"
@@ -152,7 +137,7 @@ def send_telegram(alert):
         f"Category: {alert['category']}"
     )
     if alert.get("arb_gap") and abs(alert["arb_gap"]) > 0.02:
-        msg += f"\n\n⚠️ ARB GAP: {alert['arb_gap']:.1%}"
+        msg += f"\n\n\u26a0\ufe0f ARB GAP: {alert['arb_gap']:.1%}"
 
     try:
         requests.post(
@@ -187,13 +172,10 @@ async def monitor_trades():
 
     while running:
         try:
-            # Subscribe to trade events
             async with websockets.connect(WS_URL, ping_interval=30, ping_timeout=10) as ws:
                 print(f"  Connected to {WS_URL}")
-                reconnect_delay = 2  # reset on success
+                reconnect_delay = 2
 
-                # Subscribe to all market trade channels
-                # Polymarket WS expects asset subscription messages
                 sub_msg = json.dumps({
                     "type": "subscribe",
                     "channel": "trades",
@@ -206,14 +188,12 @@ async def monitor_trades():
                         msg = await asyncio.wait_for(ws.recv(), timeout=60)
                         data = json.loads(msg)
 
-                        # Process trade messages
                         if isinstance(data, dict):
                             trades = data.get("data", [data])
                             if not isinstance(trades, list):
                                 trades = [trades]
 
                             for trade in trades:
-                                # Check if any trade involves a tracked wallet
                                 maker = trade.get("maker_address", "")
                                 taker = trade.get("taker_address", "")
                                 owner = trade.get("owner", "")
@@ -226,7 +206,6 @@ async def monitor_trades():
                                         create_alert(wallet, trade, market_info)
 
                     except asyncio.TimeoutError:
-                        # No message in 60s — send ping to keep alive
                         try:
                             await ws.ping()
                         except Exception:
@@ -243,16 +222,13 @@ async def monitor_trades():
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, 60)
 
-            # Refresh tracked wallets on reconnect
             load_tracked_wallets()
 
 
 # ── Fallback: REST polling ──
 
 async def poll_trades():
-    """
-    Poll the Polymarket data API for recent trades by tracked wallets.
-    """
+    """Poll the Polymarket data API for recent trades by tracked wallets."""
     print("\n" + "=" * 60)
     print("POLYMARKET TRADE POLLER (DATA API)")
     print("=" * 60)
@@ -301,11 +277,9 @@ async def poll_trades():
 
             await asyncio.sleep(0.5)
 
-        # Cap seen_trades size
         if len(seen_trades) > 10000:
             seen_trades = set(list(seen_trades)[-5000:])
 
-        # Wait between full cycles
         await asyncio.sleep(30)
 
 
